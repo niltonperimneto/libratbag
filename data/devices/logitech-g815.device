@@ -1,0 +1,5 @@
+[Device]
+Name=Logitech G815
+DeviceMatch=usb:046d:c33f
+Driver=hidpp20
+DeviceType=keyboard

@@ -1,0 +1,12 @@
+[Device]
+Name=SteelSeries Kinzu V3
+DeviceMatch=usb:1038:1388
+Driver=steelseries
+DeviceType=mouse
+
+[Driver/steelseries]
+DeviceVersion=1
+Buttons=3
+Leds=0
+DpiList=250;500;1000;1250;1500;1750;2000;4000
+MacroLength=0

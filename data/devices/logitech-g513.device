@@ -1,0 +1,5 @@
+[Device]
+Name=Logitech G513
+DeviceMatch=usb:046d:c33c
+Driver=hidpp20
+DeviceType=keyboard

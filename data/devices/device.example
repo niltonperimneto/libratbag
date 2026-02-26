@@ -1,0 +1,109 @@
+# Example description file for a libratbag device
+#
+# Make sure the file has a recognizable name with a '.device' suffix
+
+[Device]
+# The kernel name of the device. This name is not used by libratbag, it is
+# used by debugging tools.
+Name=Logitech Example Device
+
+# DeviceMatch is a triplet of bus:vid:pid, where bus is 'usb' or bluetooth'
+# and pid/vid are lowercase 4-digit hexadecimal numbers with preceding
+# zeroes.
+DeviceMatch=usb:12ab:00f2
+
+# The libratbag driver backend
+Driver=hidpp10
+
+# The type of this Device: either 'mouse', 'keyboard' or 'other'
+DeviceType=mouse
+
+# Only one group of driver-specific properties is permitted and it must be
+# [Driver/<drivername>]. It is a bug do have any other [Driver/foo] group in
+# a device file, but this example file lists all.
+
+[Driver/hidpp10]
+# The number of profiles, must be greater than 0
+Profiles=1
+
+# The type of the profile
+ProfileType=G9
+
+# The range of available resolutions in the form min:max@step
+# Mutually exclusive with DpiList
+DpiRange=50:5700@50
+
+# The list of available resolutions, separated by semicolons.
+# Mutually exclusive with DpiRange
+# Where possible, DpiRange should be preferred
+DpiList=50;200;400;800
+
+# The HID++ 1.0 device index
+# Should be unset unless required
+# DeviceIndex=1
+
+# The number of LEDs
+Leds=1
+
+
+[Driver/hidpp20]
+# The HID++ 2.0 device index
+# Should be unset unless required
+# DeviceIndex=1
+
+
+[Driver/asus]
+# Number of profiles
+Profiles=3
+
+# Number of buttons
+Buttons=8
+
+# Number of LEDs
+Leds=3
+
+# Number of DPI presets
+Dpis=2
+
+# Set if device is wireless
+# Wireless=1
+
+# DPI range in format min:max@step
+DpiRange=100:16000@100
+
+# Button mapping
+# ButtonMapping=f0;f1;f2;e4;e5;e6;e8;e9
+
+# Device quirks
+# Quirk=DOUBLE_DPI;STRIX_PROFILE
+
+# Replace `FEED` in the group name with firmware version of the device.
+# To find the right value, see the output of ratbagd and search a message like:
+# "ratbag error: Device with firmware version FEED is not supported"
+# Official software utility configuration file key: `PSD` (converted from
+# ASCII codes).
+[Driver/sinowealth/devices/FEED]
+# Number of buttons.
+# Official software utility configuration file key: `KM` (divided by 2).
+# Default: 0.
+Buttons=6
+
+# Device name.
+DeviceName=CoolVendor CoolMouse
+
+# The order of LED pins on the mouse.
+# Change this to `RBG` if LED colors are weird.
+# Use `None` if there are no LEDs on the mouse.
+# Permitted values: ("RGB", "RBG", "None").
+LedType=RGB
+
+# Number of profiles, called "modes" in official software utilities.
+# If you are unsure what the "mode" thing is about, don't set this field.
+# Official software utility configuration file key: `MDNUM` (divided by 3).
+# Default: 1.
+Profiles=1
+
+# Sensor type.
+# This field is unused, only used for book-keeping purposes.
+# Official software utility configuration file key: `Sensor`.
+SensorType=PMW3289

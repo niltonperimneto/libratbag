@@ -1,0 +1,10 @@
+# Logitech G602 over wireless USB
+[Device]
+Name=Logitech G602
+DeviceMatch=usb:046d:402c
+Driver=hidpp20
+DeviceType=mouse
+
+[Driver/hidpp20]
+DeviceIndex=1
+Quirk=G602

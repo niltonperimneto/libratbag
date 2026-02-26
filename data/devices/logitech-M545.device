@@ -1,0 +1,6 @@
+# Logitech M545
+[Device]
+Name=Logitech M545
+DeviceMatch=usb:046d:4052
+DeviceType=mouse
+Driver=hidpp20

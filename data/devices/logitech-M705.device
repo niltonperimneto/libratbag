@@ -1,0 +1,6 @@
+# Logitech M705
+[Device]
+Name=Logitech M705
+DeviceMatch=usb:046d:101b
+Driver=hidpp10
+DeviceType=mouse

@@ -1,0 +1,11 @@
+[Device]
+Name=Glorious Model O/O-
+DeviceMatch=usb:258a:0036
+DeviceType=mouse
+Driver=sinowealth
+
+[Driver/sinowealth/devices/V103]
+Buttons=6
+DeviceName=Glorious Model O/O- (updated firmware)
+LedType=RBG
+SensorType=PMW3360

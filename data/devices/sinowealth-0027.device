@@ -1,0 +1,35 @@
+[Device]
+DeviceMatch=usb:258a:0027
+DeviceType=mouse
+Driver=sinowealth
+Name=SinoWealth Generic Mouse (0027)
+
+[Driver/sinowealth/devices/3106]
+Buttons=8
+DeviceName=DreamMachines DM5 Blink
+LedType=RGB
+SensorType=PMW3389
+
+[Driver/sinowealth/devices/V161]
+Buttons=6
+# Can be both `Ace` and `Classic` version.
+DeviceName=G-Wolves Hati HT-M Wired
+LedType=None
+# Can also be PMW3389
+SensorType=PMW3360
+
+[Driver/sinowealth/devices/3110]
+# There are 5 main buttons.
+# Side buttons are detachable.
+# There can be either 3 or 9 buttons on the side.
+# Going for the maximum count: 5 + 9 = 14.
+Buttons=14
+DeviceName=Genesys Xenon 770
+LedType=RGB
+SensorType=PMW3327
+
+[Driver/sinowealth/devices/V102]
+Buttons=6
+DeviceName=Glorious Model O (old firmware)
+LedType=RBG
+SensorType=PMW3360

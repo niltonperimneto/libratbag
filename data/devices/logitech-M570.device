@@ -1,0 +1,6 @@
+# Logitech M570
+[Device]
+Name=Logitech M570
+DeviceMatch=usb:046d:1028
+Driver=hidpp10
+DeviceType=mouse
