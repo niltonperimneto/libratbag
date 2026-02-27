@@ -24,6 +24,24 @@ pub const PAGE_COLOR_LED_EFFECTS: u16 = 0x8070;
 pub const PAGE_RGB_EFFECTS: u16 = 0x8071;
 pub const PAGE_ONBOARD_PROFILES: u16 = 0x8100;
 
+/* Computes Logitech's variant of CRC-CCITT (polynomial 0x1021, seed 0xFFFF). */
+pub fn compute_ccitt_crc(data: &[u8]) -> u16 {
+    let mut crc = 0xFFFFu16;
+
+    for &byte in data {
+        let temp = (crc >> 8) ^ u16::from(byte);
+        crc <<= 8;
+        let mut quick = temp ^ (temp >> 4);
+        crc ^= quick;
+        quick <<= 5;
+        crc ^= quick;
+        quick <<= 7;
+        crc ^= quick;
+    }
+
+    crc
+}
+
 /* Root feature index — always fixed at 0x00 */
 pub const ROOT_FEATURE_INDEX: u8 = 0x00;
 
@@ -140,6 +158,16 @@ pub fn build_led_payload(led: &crate::device::LedInfo) -> [u8; LED_PAYLOAD_SIZE]
     payload
 }
 
+/* Feature 0x8100 Button Data */
+pub const BUTTON_TYPE_MACRO: u8 = 0x00;
+pub const BUTTON_TYPE_HID: u8 = 0x80;
+pub const BUTTON_TYPE_SPECIAL: u8 = 0x90;
+pub const BUTTON_TYPE_DISABLED: u8 = 0xFF;
+
+pub const BUTTON_SUBTYPE_MOUSE: u8 = 0x01;
+pub const BUTTON_SUBTYPE_KEYBOARD: u8 = 0x02;
+pub const BUTTON_SUBTYPE_CONSUMER: u8 = 0x03;
+
 /* A parsed HID++ report. */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HidppReport {
@@ -147,6 +175,7 @@ pub enum HidppReport {
     Short {
         device_index: u8,
         sub_id: u8,
+        address: u8,
         params: [u8; 3],
     },
     /* Long report (20 bytes, report ID 0x11). */
@@ -171,7 +200,8 @@ impl HidppReport {
             REPORT_ID_SHORT => Some(Self::Short {
                 device_index: buf[1],
                 sub_id: buf[2],
-                params: [buf[3], buf[4], buf[5]],
+                address: buf[3],
+                params: [buf[4], buf[5], buf[6]],
             }),
             REPORT_ID_LONG if buf.len() >= 20 => {
                 let mut params = [0u8; 16];
@@ -187,7 +217,6 @@ impl HidppReport {
         }
     }
 
-    /* Check if this report is an error response (0x8F for short, 0xFF for long). */
     pub fn is_error(&self) -> bool {
         match self {
             Self::Short { sub_id, .. } => *sub_id == HIDPP10_ERROR,
@@ -207,16 +236,27 @@ impl HidppReport {
 }
 
 /* Build a 7-byte HID++ short report. */
-pub fn build_short_report(device_index: u8, sub_id: u8, params: [u8; 3]) -> [u8; 7] {
+pub fn build_short_report(device_index: u8, sub_id: u8, address: u8, params: [u8; 3]) -> [u8; 7] {
     [
         REPORT_ID_SHORT,
         device_index,
         sub_id,
+        address,
         params[0],
         params[1],
         params[2],
-        0x00,
     ]
+}
+
+/* Build a 20-byte HID++ long report. */
+pub fn build_long_report(device_index: u8, sub_id: u8, address: u8, params: [u8; 16]) -> [u8; 20] {
+    let mut buf = [0u8; 20];
+    buf[0] = REPORT_ID_LONG;
+    buf[1] = device_index;
+    buf[2] = sub_id;
+    buf[3] = address;
+    buf[4..20].copy_from_slice(&params);
+    buf
 }
 
 /* Build a HID++ 2.0 feature request. */
@@ -245,13 +285,14 @@ mod tests {
 
     #[test]
     fn parse_short_report() {
-        let buf = [0x10, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0x00];
+        let buf = [0x10, 0x00, 0x01, 0x57, 0xAA, 0xBB, 0xCC];
         let report = HidppReport::parse(&buf).expect("valid short report");
         assert_eq!(
             report,
             HidppReport::Short {
                 device_index: 0x00,
                 sub_id: 0x01,
+                address: 0x57,
                 params: [0xAA, 0xBB, 0xCC],
             }
         );
@@ -290,12 +331,14 @@ mod tests {
 
     #[test]
     fn build_short_roundtrip() {
-        let report = build_short_report(0x00, 0x01, [0xAA, 0xBB, 0xCC]);
+        let report = build_short_report(0x00, 0x01, 0xAA, [0xBB, 0xCC, 0xDD]);
         let parsed = HidppReport::parse(&report).expect("roundtrip");
         match parsed {
-            HidppReport::Short { device_index, sub_id, .. } => {
+            HidppReport::Short { device_index, sub_id, address, params } => {
                 assert_eq!(device_index, 0x00);
                 assert_eq!(sub_id, 0x01);
+                assert_eq!(address, 0xAA);
+                assert_eq!(params[0], 0xBB);
             }
             _ => panic!("Expected Short report"),
         }
@@ -318,6 +361,7 @@ mod tests {
         let err_short = HidppReport::Short {
             device_index: 0,
             sub_id: HIDPP10_ERROR,
+            address: 0,
             params: [0; 3],
         };
         assert!(err_short.is_error());
@@ -325,6 +369,7 @@ mod tests {
         let ok_short = HidppReport::Short {
             device_index: 0,
             sub_id: 0x01,
+            address: 0,
             params: [0; 3],
         };
         assert!(!ok_short.is_error());

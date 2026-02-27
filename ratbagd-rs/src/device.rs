@@ -1,7 +1,8 @@
 /* Button action types exposed over DBus. */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum ActionType {
+    #[default]
     None = 0,
     Button = 1,
     Special = 2,
@@ -76,10 +77,15 @@ impl LedMode {
 }
 
 /* Resolution value, either unified or per-axis. */
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum Dpi {
+    #[default]
+    Unknown,
     Unified(u32),
-    Separate { x: u32, y: u32 },
+    Separate {
+        x: u32,
+        y: u32,
+    },
 }
 
 /* Device state synced from hardware. */
@@ -90,6 +96,7 @@ pub struct DeviceInfo {
     pub model: String,
     pub firmware_version: String,
     pub profiles: Vec<ProfileInfo>,
+    pub driver_config: crate::device_database::DriverConfig,
 }
 
 impl DeviceInfo {
@@ -206,12 +213,13 @@ impl DeviceInfo {
             model,
             firmware_version: String::new(),
             profiles,
+            driver_config: entry.driver_config.clone().unwrap_or_default(),
         }
     }
 }
 
 /* Profile state. */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProfileInfo {
     pub index: u32,
     pub name: String,
@@ -229,7 +237,7 @@ pub struct ProfileInfo {
 }
 
 /* Resolution state. */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolutionInfo {
     pub index: u32,
     pub dpi: Dpi,
@@ -241,7 +249,7 @@ pub struct ResolutionInfo {
 }
 
 /* Button mapping state. */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ButtonInfo {
     pub index: u32,
     pub action_type: ActionType,

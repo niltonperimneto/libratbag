@@ -6,9 +6,11 @@ use tracing::{debug, warn};
 
 /* A parsed `.device` file entry describing a supported mouse. */
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DeviceEntry {
     pub name: String,
     pub driver: String,
+    pub device_type: String,
     pub matches: Vec<DeviceMatch>,
     pub driver_config: Option<DriverConfig>,
 }
@@ -23,14 +25,20 @@ pub struct DeviceMatch {
 
 /* Driver-specific configuration from the `[Driver/xxx]` section. */
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct DriverConfig {
     pub profiles: Option<u32>,
     pub buttons: Option<u32>,
     pub leds: Option<u32>,
     pub dpis: Option<u32>,
     pub dpi_range: Option<DpiRange>,
-    #[allow(dead_code)]
     pub wireless: bool,
+    pub device_version: Option<u32>,
+    pub macro_length: Option<u32>,
+    pub quirks: Vec<String>,
+    pub button_mapping: Vec<u8>,
+    pub button_mapping_secondary: Vec<u8>,
+    pub led_modes: Vec<String>,
 }
 
 /* A DPI range specification parsed from `DpiRange=min:max@step`. */
@@ -105,15 +113,29 @@ fn parse_device_file(path: &Path) -> Result<DeviceEntry, String> {
     let match_str = ini
         .get("device", "devicematch")
         .ok_or("Missing [Device] DeviceMatch")?;
+    let device_type = ini
+        .get("device", "devicetype")
+        .unwrap_or_else(|| "mouse".to_string());
 
     /* Parse semicolon-separated match patterns: "usb:046d:c539;usb:046d:c53a" */
     let matches = parse_device_matches(&match_str)?;
 
     /* [Driver/xxx] section — optional */
     let driver_section = format!("driver/{}", driver);
-    let driver_config = if ini.get(&driver_section, "profiles").is_some()
+    let has_driver_section = ini.get(&driver_section, "profiles").is_some()
         || ini.get(&driver_section, "buttons").is_some()
-    {
+        || ini.get(&driver_section, "leds").is_some()
+        || ini.get(&driver_section, "dpis").is_some()
+        || ini.get(&driver_section, "dpirange").is_some()
+        || ini.get(&driver_section, "deviceversion").is_some()
+        || ini.get(&driver_section, "macrolength").is_some()
+        || ini.get(&driver_section, "quirk").is_some()
+        || ini.get(&driver_section, "quirks").is_some()
+        || ini.get(&driver_section, "buttonmapping").is_some()
+        || ini.get(&driver_section, "buttonmappingsecondary").is_some()
+        || ini.get(&driver_section, "ledmodes").is_some();
+
+    let driver_config = if has_driver_section {
         Some(parse_driver_config(&ini, &driver_section))
     } else {
         None
@@ -122,6 +144,7 @@ fn parse_device_file(path: &Path) -> Result<DeviceEntry, String> {
     Ok(DeviceEntry {
         name,
         driver,
+        device_type,
         matches,
         driver_config,
     })
@@ -160,11 +183,31 @@ fn parse_device_matches(s: &str) -> Result<Vec<DeviceMatch>, String> {
 
 /* Parse the `[Driver/xxx]` section for driver-specific configuration. */
 fn parse_driver_config(ini: &Ini, section: &str) -> DriverConfig {
-    let dpi_range = if let Some(range_str) = ini.get(section, "dpirange") {
-        parse_dpi_range(&range_str)
-    } else {
-        None
-    };
+    let dpi_range = ini
+        .get(section, "dpirange")
+        .and_then(|s| parse_dpi_range(&s));
+
+    /* Quirks: handle both Logitech's singular `Quirk=` and Asus's plural `Quirks=`. */
+    let quirks = ini
+        .get(section, "quirks")
+        .or_else(|| ini.get(section, "quirk"))
+        .map(|s| parse_semicolon_strings(&s))
+        .unwrap_or_default();
+
+    let button_mapping = ini
+        .get(section, "buttonmapping")
+        .map(|s| parse_hex_array(&s))
+        .unwrap_or_default();
+
+    let button_mapping_secondary = ini
+        .get(section, "buttonmappingsecondary")
+        .map(|s| parse_hex_array(&s))
+        .unwrap_or_default();
+
+    let led_modes = ini
+        .get(section, "ledmodes")
+        .map(|s| parse_semicolon_strings(&s))
+        .unwrap_or_default();
 
     DriverConfig {
         profiles: ini.get(section, "profiles").and_then(|v| v.parse().ok()),
@@ -176,8 +219,39 @@ fn parse_driver_config(ini: &Ini, section: &str) -> DriverConfig {
             .and_then(|v| v.parse::<u32>().ok())
             .map(|v| v != 0)
             .unwrap_or(false),
+        device_version: ini
+            .get(section, "deviceversion")
+            .and_then(|v| v.parse().ok()),
+        macro_length: ini
+            .get(section, "macrolength")
+            .and_then(|v| v.parse().ok()),
         dpi_range,
+        quirks,
+        button_mapping,
+        button_mapping_secondary,
+        led_modes,
     }
+}
+
+/* Split a semicolon-delimited string into trimmed, non-empty strings. */
+fn parse_semicolon_strings(s: &str) -> Vec<String> {
+    s.split(';')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/* Parse a semicolon-delimited list of hex values (e.g. "f0;f1;e6") into bytes. */
+fn parse_hex_array(s: &str) -> Vec<u8> {
+    s.split(';')
+        .filter_map(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            u8::from_str_radix(trimmed, 16).ok()
+        })
+        .collect()
 }
 
 /* Parse a DPI range string like `"100:16000@100"`. */
@@ -234,5 +308,41 @@ mod tests {
     #[test]
     fn test_parse_device_matches_empty() {
         assert!(parse_device_matches("").is_err());
+    }
+
+    #[test]
+    fn test_parse_semicolon_strings() {
+        let result = parse_semicolon_strings("DOUBLE_DPI;RAW_BRIGHTNESS;SEPARATE_XY_DPI");
+        assert_eq!(result, vec!["DOUBLE_DPI", "RAW_BRIGHTNESS", "SEPARATE_XY_DPI"]);
+    }
+
+    #[test]
+    fn test_parse_semicolon_strings_single() {
+        let result = parse_semicolon_strings("INDEX_OFFSET");
+        assert_eq!(result, vec!["INDEX_OFFSET"]);
+    }
+
+    #[test]
+    fn test_parse_semicolon_strings_empty() {
+        let result = parse_semicolon_strings("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hex_array() {
+        let result = parse_hex_array("f0;f1;f2;0;0;e6;e8;e9;d0;d1;d2;d3");
+        assert_eq!(result, vec![0xf0, 0xf1, 0xf2, 0x00, 0x00, 0xe6, 0xe8, 0xe9, 0xd0, 0xd1, 0xd2, 0xd3]);
+    }
+
+    #[test]
+    fn test_parse_hex_array_empty() {
+        let result = parse_hex_array("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hex_array_trailing_semicolon() {
+        let result = parse_hex_array("0a;0b;");
+        assert_eq!(result, vec![0x0a, 0x0b]);
     }
 }

@@ -78,6 +78,7 @@ impl RatbagResolution {
                 OwnedValue::try_from(zbus::zvariant::Value::from((x, y)))
                     .unwrap_or_else(|_| fallback_owned_value())
             }
+            Dpi::Unknown => fallback_owned_value(),
         }
     }
 
