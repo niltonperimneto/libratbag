@@ -160,7 +160,7 @@ impl DeviceDriver for LogitechG300Driver {
                     is_disabled: false,
                     dpi: crate::device::Dpi::Unknown,
                     dpi_list: vec![],
-                    capabilities: 0,
+                    capabilities: Vec::new(),
                 });
             }
 

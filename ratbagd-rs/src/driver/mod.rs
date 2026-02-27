@@ -1,3 +1,4 @@
+pub mod asus;
 pub mod hidpp;
 pub mod hidpp10;
 pub mod hidpp20;
@@ -254,6 +255,7 @@ pub trait DeviceDriver: Send + Sync {
 /* `.device` file database.                                         */
 pub fn create_driver(driver_name: &str) -> Option<Box<dyn DeviceDriver>> {
     match driver_name {
+        "asus" => Some(Box::new(asus::AsusDriver::new())),
         "hidpp10" => Some(Box::new(hidpp10::Hidpp10Driver::new())),
         "hidpp20" => Some(Box::new(hidpp20::Hidpp20Driver::new())),
         "roccat" | "roccat-kone-pure" | "roccat-kone-emp" => {

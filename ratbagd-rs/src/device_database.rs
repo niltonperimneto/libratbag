@@ -1,8 +1,47 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use configparser::ini::Ini;
 use tracing::{debug, warn};
+
+/* Bus protocol identifier used in `.device` match patterns and DB keys. */
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BusType {
+    Usb,
+    Bluetooth,
+    Other(String),
+}
+
+impl BusType {
+    /* Convert the numeric bustype from a udev HID_ID attribute into a BusType. */
+    pub fn from_u16(bustype: u16) -> Self {
+        match bustype {
+            0x03 => BusType::Usb,
+            0x05 => BusType::Bluetooth,
+            other => BusType::Other(format!("{:04x}", other)),
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "usb" => BusType::Usb,
+            "bluetooth" => BusType::Bluetooth,
+            other => BusType::Other(other.to_string()),
+        }
+    }
+}
+
+impl fmt::Display for BusType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BusType::Usb => f.write_str("usb"),
+            BusType::Bluetooth => f.write_str("bluetooth"),
+            BusType::Other(s) => f.write_str(s),
+        }
+    }
+}
 
 /* A parsed `.device` file entry describing a supported mouse. */
 #[derive(Debug, Clone)]
@@ -18,7 +57,7 @@ pub struct DeviceEntry {
 /* A single bus:vid:pid match pattern from the `DeviceMatch=` field. */
 #[derive(Debug, Clone)]
 pub struct DeviceMatch {
-    pub bustype: String,
+    pub bustype: BusType,
     pub vid: u16,
     pub pid: u16,
 }
@@ -50,7 +89,10 @@ pub struct DpiRange {
 }
 
 /* Device database: maps `(bustype, vid, pid)` to a `DeviceEntry`. */
-pub type DeviceDb = HashMap<(String, u16, u16), DeviceEntry>;
+/*                                                                   */
+/* Entries are reference-counted so that devices with multiple match */
+/* patterns share a single allocation instead of being duplicated.   */
+pub type DeviceDb = HashMap<(BusType, u16, u16), Arc<DeviceEntry>>;
 
 /* Load all `.device` files from the given directory into a lookup table. */
 /*  */
@@ -75,17 +117,21 @@ pub fn load_device_database(data_dir: &Path) -> DeviceDb {
 
         match parse_device_file(&path) {
             Ok(entry) => {
-                let matches = entry.matches.clone();
-                for m in &matches {
-                    db.insert(
-                        (m.bustype.clone(), m.vid, m.pid),
-                        entry.clone(),
-                    );
+                /* Collect keys first so we move BusType out of the Vec
+                 * before entry is frozen inside the Arc. */
+                let keys: Vec<(BusType, u16, u16)> = entry
+                    .matches
+                    .iter()
+                    .map(|m| (m.bustype.clone(), m.vid, m.pid))
+                    .collect();
+                let entry = Arc::new(entry);
+                for key in keys {
+                    db.insert(key, Arc::clone(&entry));
                 }
                 debug!(
                     "Loaded device: {} ({} match patterns)",
                     entry.name,
-                    matches.len()
+                    entry.matches.len()
                 );
             }
             Err(err) => {
@@ -165,7 +211,7 @@ fn parse_device_matches(s: &str) -> Result<Vec<DeviceMatch>, String> {
             return Err(format!("Invalid DeviceMatch pattern: {}", part));
         }
 
-        let bustype = segments[0].to_string();
+        let bustype = BusType::from_str(segments[0]);
         let vid = u16::from_str_radix(segments[1], 16)
             .map_err(|e| format!("Invalid VID in '{}': {}", part, e))?;
         let pid = u16::from_str_radix(segments[2], 16)
@@ -259,11 +305,16 @@ fn parse_dpi_range(s: &str) -> Option<DpiRange> {
     let (range_part, step_str) = s.split_once('@')?;
     let (min_str, max_str) = range_part.split_once(':')?;
 
-    Some(DpiRange {
-        min: min_str.parse().ok()?,
-        max: max_str.parse().ok()?,
-        step: step_str.parse().ok()?,
-    })
+    let min = min_str.parse().ok()?;
+    let max = max_str.parse().ok()?;
+    let step: u32 = step_str.parse().ok()?;
+
+    /* Reject degenerate ranges that would cause step_by(0) panics or empty lists. */
+    if step == 0 || min > max {
+        return None;
+    }
+
+    Some(DpiRange { min, max, step })
 }
 
 #[cfg(test)]
@@ -274,7 +325,7 @@ mod tests {
     fn test_parse_device_matches_single() {
         let matches = parse_device_matches("usb:046d:c539").unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].bustype, "usb");
+        assert_eq!(matches[0].bustype, BusType::Usb);
         assert_eq!(matches[0].vid, 0x046d);
         assert_eq!(matches[0].pid, 0xc539);
     }
@@ -288,6 +339,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_device_matches_bluetooth() {
+        let matches = parse_device_matches("bluetooth:046d:b025").unwrap();
+        assert_eq!(matches[0].bustype, BusType::Bluetooth);
+    }
+
+    #[test]
+    fn test_parse_device_matches_mixed_bus() {
+        let matches =
+            parse_device_matches("usb:046d:4090;bluetooth:046d:b025").unwrap();
+        assert_eq!(matches[0].bustype, BusType::Usb);
+        assert_eq!(matches[1].bustype, BusType::Bluetooth);
+    }
+
+    #[test]
     fn test_parse_dpi_range() {
         let range = parse_dpi_range("100:16000@100").unwrap();
         assert_eq!(range.min, 100);
@@ -298,6 +363,16 @@ mod tests {
     #[test]
     fn test_parse_dpi_range_invalid() {
         assert!(parse_dpi_range("invalid").is_none());
+    }
+
+    #[test]
+    fn test_parse_dpi_range_zero_step() {
+        assert!(parse_dpi_range("100:16000@0").is_none());
+    }
+
+    #[test]
+    fn test_parse_dpi_range_inverted_bounds() {
+        assert!(parse_dpi_range("16000:100@100").is_none());
     }
 
     #[test]
@@ -344,5 +419,19 @@ mod tests {
     fn test_parse_hex_array_trailing_semicolon() {
         let result = parse_hex_array("0a;0b;");
         assert_eq!(result, vec![0x0a, 0x0b]);
+    }
+
+    #[test]
+    fn test_bustype_from_u16() {
+        assert_eq!(BusType::from_u16(0x03), BusType::Usb);
+        assert_eq!(BusType::from_u16(0x05), BusType::Bluetooth);
+        assert_eq!(BusType::from_u16(0x01), BusType::Other("0001".to_string()));
+    }
+
+    #[test]
+    fn test_bustype_display() {
+        assert_eq!(BusType::Usb.to_string(), "usb");
+        assert_eq!(BusType::Bluetooth.to_string(), "bluetooth");
+        assert_eq!(BusType::Other("serial".to_string()).to_string(), "serial");
     }
 }
