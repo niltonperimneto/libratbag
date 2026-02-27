@@ -76,7 +76,7 @@ impl LedMode {
 }
 
 /* Resolution value, either unified or per-axis. */
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dpi {
     Unified(u32),
     Separate { x: u32, y: u32 },
