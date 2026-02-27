@@ -14,18 +14,9 @@ use tracing::{info, warn};
 
 use crate::actor::{self, ActorHandle};
 use crate::device::DeviceInfo;
-use crate::device_database::DeviceDb;
+use crate::device_database::{BusType, DeviceDb};
 use crate::driver;
 use crate::udev_monitor::DeviceAction;
-
-/* Translate a numeric bustype from HID_ID into the string used in `.device` files. */
-fn bustype_to_string(bustype: u16) -> String {
-    match bustype {
-        0x03 => "usb".to_string(),
-        0x05 => "bluetooth".to_string(),
-        _ => format!("{:04x}", bustype),
-    }
-}
 
 /* Register a new device and its children (profiles, buttons, etc) onto the DBus bus. */
 /* Returns a list of all object paths that were registered. */
@@ -130,8 +121,7 @@ pub async fn run_server(
                 vid,
                 pid,
             } => {
-                let bus_str = bustype_to_string(bustype);
-                let key = (bus_str.clone(), vid, pid);
+                let key = (BusType::from_u16(bustype), vid, pid);
 
                 let entry = match device_db.get(&key) {
                     Some(e) => e,

@@ -93,15 +93,6 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /* Translate a numeric bustype from HID_ID into the string used in `.device` files. */
-    fn bustype_to_string(bustype: u16) -> String {
-        match bustype {
-            0x03 => "usb".to_string(),
-            0x05 => "bluetooth".to_string(),
-            _ => format!("{:04x}", bustype),
-        }
-    }
-
     /* Build a `DeviceInfo` struct from a matched `DeviceEntry` and detected hardware props. */
     pub fn from_entry(
         sysname: &str,
@@ -111,8 +102,12 @@ impl DeviceInfo {
         pid: u16,
         entry: &crate::device_database::DeviceEntry,
     ) -> Self {
-        let bus_str = Self::bustype_to_string(bustype);
-        let model = format!("{}:{:04x}:{:04x}:0", bus_str, vid, pid);
+        let model = format!(
+            "{}:{:04x}:{:04x}:0",
+            crate::device_database::BusType::from_u16(bustype),
+            vid,
+            pid
+        );
 
         /* Use the driver config to determine the number of profiles, buttons, etc. */
         let num_profiles = entry
