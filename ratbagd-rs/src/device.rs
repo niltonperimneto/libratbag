@@ -112,6 +112,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub model: String,
     pub firmware_version: String,
+    /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse, 3=keyboard */
+    pub device_type: u32,
     pub profiles: Vec<ProfileInfo>,
     pub driver_config: crate::device_database::DriverConfig,
 }
@@ -219,11 +221,20 @@ impl DeviceInfo {
             })
             .collect();
 
+        /* Map the .device file's DeviceType string to the DBus integer enum. */
+        let device_type = match entry.device_type.to_lowercase().as_str() {
+            "mouse" => 2,
+            "keyboard" => 3,
+            "other" => 1,
+            _ => 0, /* unspecified */
+        };
+
         Self {
             sysname: sysname.to_string(),
             name: name.to_string(),
             model,
             firmware_version: String::new(),
+            device_type,
             profiles,
             driver_config: entry.driver_config.clone().unwrap_or_default(),
         }

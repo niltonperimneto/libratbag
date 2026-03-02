@@ -89,8 +89,13 @@ impl RatbagButton {
         let (action_type_raw, value) = mapping;
         let action_type = ActionType::from_u32(action_type_raw);
 
-        // Parse the incoming value before taking the write lock to minimize hold time.
-        let inner: Value<'_> = value.into();
+        /* Unwrap nested Variant wrappers: some DBus clients (e.g. Piper/GLib)
+         * may send Value::Value(Value::U32(...)) instead of Value::U32(...). */
+        let mut inner: Value<'_> = value.into();
+        while let Value::Value(boxed) = inner {
+            inner = *boxed;
+        }
+
         let parsed = match action_type {
             ActionType::Macro => {
                 if let Value::Array(arr) = &inner {

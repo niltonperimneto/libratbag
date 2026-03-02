@@ -34,6 +34,49 @@ impl RatbagResolution {
             resolution_id,
         }
     }
+
+    /* Extract a u32 from a Value, accepting multiple integer types. */
+    fn extract_u32(v: &Value<'_>) -> Option<u32> {
+        match v {
+            Value::U32(n) => Some(*n),
+            Value::I32(n) => u32::try_from(*n).ok(),
+            Value::U16(n) => Some(u32::from(*n)),
+            Value::I16(n) => u32::try_from(*n).ok(),
+            Value::U8(n) => Some(u32::from(*n)),
+            Value::I64(n) => u32::try_from(*n).ok(),
+            Value::U64(n) => u32::try_from(*n).ok(),
+            _ => None,
+        }
+    }
+
+    /* Parse a DBus Value into a DPI, handling nested variants and */
+    /* multiple integer types for maximum client compatibility.    */
+    fn parse_dpi_value(value: &Value<'_>) -> Option<Dpi> {
+        /* Unwrap nested variant layers (property type is `v`, so     */
+        /* clients may double-wrap: Properties.Set sends (ssv) where  */
+        /* v contains v containing the actual value).                 */
+        let unwrapped: &Value<'_> = match value {
+            Value::Value(inner) => inner.as_ref(),
+            other => other,
+        };
+
+        if let Some(val) = Self::extract_u32(unwrapped) {
+            return Some(Dpi::Unified(val));
+        }
+
+        if let Value::Structure(s) = unwrapped {
+            let fields = s.fields();
+            if fields.len() == 2 {
+                if let (Some(x), Some(y)) =
+                    (Self::extract_u32(&fields[0]), Self::extract_u32(&fields[1]))
+                {
+                    return Some(Dpi::Separate { x, y });
+                }
+            }
+        }
+
+        None
+    }
 }
 
 #[interface(name = "org.freedesktop.ratbag1.Resolution")]
@@ -115,23 +158,17 @@ impl RatbagResolution {
 
     #[zbus(property)]
     async fn set_resolution(&self, value: OwnedValue) {
-        // Parse the incoming value before taking the write lock to minimize hold time.
+        /* Parse the incoming value before taking the write lock to minimize hold time.
+         * Piper and other clients may send the DPI as a plain u32, a (u32, u32)
+         * tuple, or wrapped in an extra variant layer (when the property type is `v`). */
         let inner: Value<'_> = value.into();
-        let new_dpi = match &inner {
-            Value::U32(val) => Some(Dpi::Unified(*val)),
-            Value::Structure(s) => {
-                if let [Value::U32(x), Value::U32(y)] = s.fields() {
-                    Some(Dpi::Separate { x: *x, y: *y })
-                } else {
-                    tracing::warn!("Invalid structure in resolution value");
-                    None
-                }
-            }
-            _ => {
-                tracing::warn!("Invalid resolution value received over DBus");
-                None
-            }
-        };
+        let new_dpi = Self::parse_dpi_value(&inner);
+
+        if new_dpi.is_none() {
+            tracing::warn!(
+                "Invalid resolution value received over DBus: {inner:?}"
+            );
+        }
 
         if let Some(dpi) = new_dpi {
             let mut info = self.device_info.write().await;

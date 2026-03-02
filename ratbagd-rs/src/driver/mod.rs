@@ -66,11 +66,25 @@ pub enum DriverError {
 #[allow(dead_code)]
 const MAX_REPORT_LEN: usize = 4096;
 
-/* Timeout per individual read attempt */
-const READ_TIMEOUT: Duration = Duration::from_millis(500);
+/* Total time budget for each attempt's read loop.                */
+/*                                                                */
+/* Wireless HID++ devices multiplex protocol responses with       */
+/* normal mouse input reports on the same hidraw node. The mouse  */
+/* may emit dozens of input reports per millisecond, so a purely  */
+/* count-based loop is insufficient — the budget is exhausted     */
+/* before the protocol response arrives. This time-based approach */
+/* keeps reading and discarding non-matching reports until the    */
+/* deadline expires or a match is found.                          */
+const READ_TIMEOUT_PER_ATTEMPT: Duration = Duration::from_millis(2000);
 
-/* Maximum number of reads to attempt per single request retry */
-const MAX_READS_PER_ATTEMPT: usize = 10;
+/* Timeout for each individual read syscall within the loop.      */
+const SINGLE_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
+/* HID++ report ID prefixes. Any report whose first byte is NOT   */
+/* one of these is a regular HID input report (mouse movement,    */
+/* keyboard, etc.) and should be silently skipped.                */
+const HIDPP_SHORT_REPORT_ID: u8 = 0x10;
+const HIDPP_LONG_REPORT_ID: u8 = 0x11;
 
 /* Compute the `HIDIOCGFEATURE(len)` ioctl request number.        */
 /*                                                                */
@@ -188,10 +202,17 @@ impl DeviceIo {
 
     /* Send a report and wait for a matching response.             */
     /*                                                             */
-    /* The `matcher` closure receives each incoming report and     */
-    /* returns `Some(T)` when the expected response has arrived,   */
-    /* or `None` to keep waiting. Retries up to `max_attempts`    */
-    /* times. Fails with `DriverError::Timeout` when exhausted.   */
+    /* The `matcher` closure receives each incoming HID++ report   */
+    /* and returns `Some(T)` when the expected response has        */
+    /* arrived, or `None` to keep waiting.                         */
+    /*                                                             */
+    /* The read loop is TIME-based, not count-based, because       */
+    /* wireless receivers multiplex HID++ protocol responses with  */
+    /* regular mouse input reports on the same hidraw node. The    */
+    /* mouse can emit hundreds of input reports per second, so a   */
+    /* count-based loop would be exhausted before the protocol     */
+    /* response arrives. Non-HID++ reports (those not starting     */
+    /* with 0x10 or 0x11) are silently discarded.                  */
     pub async fn request<T, F>(
         &mut self,
         report: &[u8],
@@ -205,10 +226,32 @@ impl DeviceIo {
         for attempt in 1..=max_attempts {
             self.write_report(report).await?;
 
+            let deadline = tokio::time::Instant::now() + READ_TIMEOUT_PER_ATTEMPT;
             let mut buf = vec![0u8; report_size];
-            for _ in 0..MAX_READS_PER_ATTEMPT {
-                match tokio::time::timeout(READ_TIMEOUT, self.read_report(&mut buf)).await {
+
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    debug!("Read deadline expired on attempt {attempt}");
+                    break;
+                }
+
+                /* Use the shorter of the remaining budget and the     */
+                /* per-read timeout so we don't block forever on a     */
+                /* single read if the device stops sending reports.     */
+                let read_timeout = remaining.min(SINGLE_READ_TIMEOUT);
+
+                match tokio::time::timeout(read_timeout, self.read_report(&mut buf)).await {
                     Ok(Ok(n)) => {
+                        /* Skip non-HID++ input reports (mouse movement, */
+                        /* keyboard, etc.) — they are noise here.        */
+                        if n > 0
+                            && buf[0] != HIDPP_SHORT_REPORT_ID
+                            && buf[0] != HIDPP_LONG_REPORT_ID
+                        {
+                            continue;
+                        }
+
                         if let Some(result) = matcher(&buf[..n]) {
                             return Ok(result);
                         }
@@ -218,6 +261,8 @@ impl DeviceIo {
                         break;
                     }
                     Err(_elapsed) => {
+                        /* Single-read timeout: no more data coming,   */
+                        /* break to retry with a fresh write.          */
                         debug!("Timeout on attempt {attempt}");
                         break;
                     }

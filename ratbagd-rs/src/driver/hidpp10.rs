@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::device::DeviceInfo;
 use crate::driver::DeviceIo;
 
-use super::hidpp::{self, HidppReport, DEVICE_IDX_WIRED};
+use super::hidpp::{self, HidppReport, DEVICE_IDX_CORDED, DEVICE_IDX_RECEIVER};
 
 /* HID++ 1.0 register addresses */
 const REG_PROTOCOL_VERSION: u8 = 0x00;
@@ -108,9 +108,47 @@ pub struct Hidpp10Driver {
 impl Hidpp10Driver {
     pub fn new() -> Self {
         Self {
-            device_index: DEVICE_IDX_WIRED,
+            device_index: DEVICE_IDX_RECEIVER,
             version: ProtocolVersion::default(),
         }
+    }
+
+    /* Attempt a HID++ 1.0 protocol version probe at a specific device index. */
+    /* Returns `Some(params)` on success, `None` on timeout or error.         */
+    async fn try_probe_index(
+        &self,
+        io: &mut DeviceIo,
+        idx: u8,
+    ) -> Option<[u8; 3]> {
+        let request = hidpp::build_short_report(
+            idx,
+            SUB_ID_GET_REGISTER,
+            REG_PROTOCOL_VERSION,
+            [0x00, 0x00, 0x00],
+        );
+
+        io.request(&request, 20, 2, move |buf| {
+            let report = HidppReport::parse(buf)?;
+            if report.is_error() {
+                return None;
+            }
+            match report {
+                HidppReport::Short {
+                    device_index,
+                    sub_id,
+                    address,
+                    params,
+                } if device_index == idx
+                    && sub_id == SUB_ID_GET_REGISTER
+                    && address == REG_PROTOCOL_VERSION =>
+                {
+                    Some(params)
+                }
+                _ => None,
+            }
+        })
+        .await
+        .ok()
     }
 
     /* Send a short GET_REGISTER request and return the 3 response bytes. */
@@ -440,21 +478,29 @@ impl super::DeviceDriver for Hidpp10Driver {
     }
 
     async fn probe(&mut self, io: &mut DeviceIo) -> Result<()> {
-        let params = self
-            .get_register(io, REG_PROTOCOL_VERSION, [0x00, 0x00, 0x00])
-            .await
-            .context("Protocol version query failed")?;
+        /* Try the wireless receiver index first, then fall back to corded. */
+        const PROBE_INDICES: &[u8] = &[DEVICE_IDX_RECEIVER, DEVICE_IDX_CORDED];
 
-        self.version = ProtocolVersion {
-            major: params[0],
-            minor: params[1],
-        };
+        for &idx in PROBE_INDICES {
+            if let Some(params) = self.try_probe_index(io, idx).await {
+                self.device_index = idx;
+                self.version = ProtocolVersion {
+                    major: params[0],
+                    minor: params[1],
+                };
+                info!(
+                    "HID++ 1.0 device detected at index 0x{idx:02X} (protocol {}.{})",
+                    self.version.major, self.version.minor
+                );
+                return Ok(());
+            }
+            debug!("HID++ 1.0 probe at index 0x{idx:02X}: no response");
+        }
 
-        info!(
-            "HID++ 1.0 device detected (protocol {}.{})",
-            self.version.major, self.version.minor
+        anyhow::bail!(
+            "HID++ 1.0 protocol version probe failed (tried indices: {:02X?})",
+            PROBE_INDICES
         );
-        Ok(())
     }
 
     async fn load_profiles(&mut self, io: &mut DeviceIo, info: &mut DeviceInfo) -> Result<()> {

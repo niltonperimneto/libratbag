@@ -292,6 +292,7 @@ pub mod spec {
             name: format!("Test Device ({})", sysname),
             model: "test:0000:0000:0".to_string(),
             firmware_version: String::new(),
+            device_type: 2, /* mouse */
             profiles,
             driver_config: DriverConfig::default(),
         }

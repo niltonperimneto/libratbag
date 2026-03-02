@@ -10,3 +10,4 @@ Thumbs.db
 ratbagctl-rs/target/*
 .agents/
 .github/
+test/

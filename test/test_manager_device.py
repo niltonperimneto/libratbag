@@ -52,11 +52,13 @@ class TestManager:
         devices = dbus_client.manager_devices()
         assert isinstance(devices, list)
 
+    @pytest.mark.requires_dev_hooks
     def test_load_minimal_test_device(self, dbus_client: RatbagDBusClient):
         """Loading an empty JSON spec should produce a valid device."""
         path = _load_and_get_device(dbus_client, MINIMAL_DEVICE_JSON)
         assert path.startswith("/org/freedesktop/ratbag1/")
 
+    @pytest.mark.requires_dev_hooks
     def test_load_test_device_appears_in_devices(
         self, dbus_client: RatbagDBusClient
     ):
@@ -65,6 +67,7 @@ class TestManager:
         devices = dbus_client.manager_devices()
         assert path in devices
 
+    @pytest.mark.requires_dev_hooks
     def test_reset_test_device(self, dbus_client: RatbagDBusClient):
         """ResetTestDevice should remove the injected device."""
         path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
@@ -74,6 +77,7 @@ class TestManager:
         devices = dbus_client.manager_devices()
         assert path not in devices
 
+    @pytest.mark.requires_dev_hooks
     def test_load_replaces_previous(self, dbus_client: RatbagDBusClient):
         """Loading a new test device should replace the previous one."""
         path1 = _load_and_get_device(dbus_client, MINIMAL_DEVICE_JSON)
@@ -88,6 +92,7 @@ class TestManager:
 # ===========================================================================
 
 
+@pytest.mark.requires_dev_hooks
 class TestDevice:
     """org.freedesktop.ratbag1.Device interface tests."""
 

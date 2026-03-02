@@ -46,6 +46,12 @@ impl RatbagDevice {
         self.info.read().await.firmware_version.clone()
     }
 
+    /// Device type: 0=unspecified, 1=other, 2=mouse, 3=keyboard.
+    #[zbus(property)]
+    async fn device_type(&self) -> u32 {
+        self.info.read().await.device_type
+    }
+
     /// Array of object paths to this device's profiles.
     #[zbus(property)]
     async fn profiles(&self) -> Vec<ObjectPath<'static>> {

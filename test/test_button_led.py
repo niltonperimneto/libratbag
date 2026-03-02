@@ -12,6 +12,8 @@ import pytest
 from .conftest import SIMPLE_DEVICE_JSON, MULTI_PROFILE_DEVICE_JSON
 from .ratbag_dbus import RatbagDBusClient
 
+pytestmark = pytest.mark.requires_dev_hooks
+
 
 # ---------------------------------------------------------------------------
 # Constants matching the Rust enums

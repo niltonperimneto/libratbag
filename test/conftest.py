@@ -36,6 +36,18 @@ def _wait_for_daemon(client: RatbagDBusClient, timeout: float = 5.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Custom pytest markers
+# ---------------------------------------------------------------------------
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_dev_hooks: skip test when daemon lacks dev-hooks feature",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session-scoped fixtures
 # ---------------------------------------------------------------------------
 
@@ -51,15 +63,31 @@ def dbus_client():
     return client
 
 
+@pytest.fixture(scope="session")
+def dev_hooks_available(dbus_client: RatbagDBusClient) -> bool:
+    """True if the daemon was built with the dev-hooks feature."""
+    return dbus_client.has_dev_hooks()
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_dev_hooks(request, dev_hooks_available):
+    """Auto-skip tests marked ``requires_dev_hooks`` when unavailable."""
+    if request.node.get_closest_marker("requires_dev_hooks"):
+        if not dev_hooks_available:
+            pytest.skip("daemon not built with --features dev-hooks")
+
+
 # ---------------------------------------------------------------------------
 # Function-scoped fixtures (reset between tests)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
-def _reset_test_device(dbus_client: RatbagDBusClient):
+def _reset_test_device(dbus_client: RatbagDBusClient, dev_hooks_available):
     """Ensure each test starts with a clean slate by resetting test devices."""
     yield
+    if not dev_hooks_available:
+        return
     try:
         dbus_client.reset_test_device()
     except Exception:

@@ -42,8 +42,14 @@ class RatbagDBusClient:
     # ------------------------------------------------------------------
 
     def _get_proxy(self, path: str):
-        """Return a dbus proxy object for *path*."""
-        return self._bus.get_object(BUS_NAME, path)
+        """Return a dbus proxy object for *path*.
+
+        Introspection is disabled because the daemon's XML can contain
+        tokens that dbus-python's parser chokes on (e.g. Rust type
+        signatures).  All method/property calls are made by explicit
+        interface name, so introspection is unnecessary.
+        """
+        return self._bus.get_object(BUS_NAME, path, introspect=False)
 
     def _get_property(self, path: str, iface: str, prop: str) -> Any:
         obj = self._get_proxy(path)
@@ -52,8 +58,12 @@ class RatbagDBusClient:
 
     def _set_property(self, path: str, iface: str, prop: str, value: Any):
         obj = self._get_proxy(path)
-        props = dbus.Interface(obj, PROPERTIES_IFACE)
-        props.Set(iface, prop, value)
+        # Properties.Set signature is (ssv) — the value must be a variant.
+        # Because introspection is disabled, dbus-python won't auto-wrap it,
+        # so we call the low-level method with an explicit signature.
+        obj.get_dbus_method("Set", PROPERTIES_IFACE)(
+            iface, prop, value, signature="ssv"
+        )
 
     def _call_method(self, path: str, iface: str, method: str, *args):
         obj = self._get_proxy(path)
@@ -79,6 +89,28 @@ class RatbagDBusClient:
     def reset_test_device(self):
         """Remove the currently injected test device (requires dev-hooks)."""
         self._call_method(MANAGER_PATH, MANAGER_IFACE, "ResetTestDevice")
+
+    def has_dev_hooks(self) -> bool:
+        """Return True if the daemon exposes LoadTestDevice (dev-hooks build).
+
+        Attempts a lightweight probe — calling LoadTestDevice with an
+        intentionally bad payload.  If the method exists, the daemon will
+        return *some* error (but not ``UnknownMethod``).  If the method
+        does not exist, dbus-python raises ``UnknownMethod``.
+        """
+        try:
+            self._call_method(
+                MANAGER_PATH, MANAGER_IFACE, "LoadTestDevice", "{}"
+            )
+            # The call might actually succeed for an empty spec
+            return True
+        except dbus.exceptions.DBusException as exc:
+            if "UnknownMethod" in str(exc.get_dbus_name() or ""):
+                return False
+            # Any other DBus error means the method exists
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Device interface

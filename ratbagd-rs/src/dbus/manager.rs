@@ -91,7 +91,7 @@ impl RatbagManager {
     ///
     /// Only available when built with `--features dev-hooks`.
     #[cfg(feature = "dev-hooks")]
-    async fn load_test_device(&mut self, json: String) -> zbus::fdo::Result<()> {
+    async fn load_test_device(&mut self, json: String) -> zbus::fdo::Result<String> {
         use crate::test_device::spec::{build_device_info, parse_json};
 
         let spec = parse_json(&json).map_err(|e| {
@@ -125,7 +125,7 @@ impl RatbagManager {
         self.current_test_sysname = Some(sysname.clone());
 
         tx.send(DeviceAction::InjectTest {
-            sysname,
+            sysname: sysname.clone(),
             device_info,
         })
         .await
@@ -134,7 +134,7 @@ impl RatbagManager {
             zbus::fdo::Error::Failed("Internal send error".into())
         })?;
 
-        Ok(())
+        Ok(sysname)
     }
 
     /// Remove the currently-live synthetic test device.

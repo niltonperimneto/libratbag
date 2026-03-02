@@ -12,8 +12,14 @@ pub const REPORT_ID_LONG: u8 = 0x11;
 pub const HIDPP10_ERROR: u8 = 0x8F;
 pub const HIDPP20_ERROR: u8 = 0xFF;
 
-/* Well-known device indices */
-pub const DEVICE_IDX_WIRED: u8 = 0x00;
+/* Well-known device indices.                                      */
+/*                                                                 */
+/* Logitech HID++ addresses devices by index:                      */
+/* - 0xFF: The device itself when directly connected (wired/BT).   */
+/* - 0x01–0x06: Paired devices on a Unifying / Lightspeed / Bolt   */
+/*   receiver.  0x01 is the first (and usually only) paired slot.  */
+pub const DEVICE_IDX_CORDED: u8 = 0xFF;
+pub const DEVICE_IDX_RECEIVER: u8 = 0x01;
 
 /* HID++ 2.0 feature pages */
 pub const PAGE_DEVICE_NAME: u16 = 0x0005;
@@ -232,6 +238,63 @@ impl HidppReport {
             Self::Long { device_index, sub_id, .. }
                 if *device_index == expected_dev && *sub_id == expected_feature
         )
+    }
+
+    /* Check if this report is a HID++ 2.0 error for the given device          */
+    /* and feature.  Returns `Some(error_code)` when matched.                   */
+    /*                                                                          */
+    /* Two error formats exist:                                                 */
+    /* - Long  (0x11): [dev, 0xFF, feature_idx, (fn<<4|sw), error_code, ...]    */
+    /* - Short (0x10): [dev, 0x8F, feature_idx, (fn<<4|sw), error_code, 0]      */
+    /*   The short variant is used by receivers when the wireless device is      */
+    /*   unreachable or the request is invalid.                                 */
+    pub fn hidpp20_error_code(
+        &self,
+        expected_dev: u8,
+        expected_feature: u8,
+    ) -> Option<u8> {
+        match self {
+            Self::Long {
+                device_index,
+                sub_id,
+                address,
+                params,
+            } if *device_index == expected_dev
+                && *sub_id == HIDPP20_ERROR
+                && *address == expected_feature =>
+            {
+                Some(params[1])
+            }
+            Self::Short {
+                device_index,
+                sub_id,
+                address,
+                params,
+            } if *device_index == expected_dev
+                && *sub_id == HIDPP10_ERROR
+                && *address == expected_feature =>
+            {
+                Some(params[1])
+            }
+            _ => None,
+        }
+    }
+}
+
+/* Human-readable name for a HID++ 2.0 error code.                 */
+pub fn hidpp20_error_name(code: u8) -> &'static str {
+    match code {
+        0x00 => "NO_ERROR",
+        0x01 => "UNKNOWN",
+        0x02 => "INVALID_ARGUMENT",
+        0x03 => "OUT_OF_RANGE",
+        0x04 => "HARDWARE_ERROR",
+        0x05 => "LOGITECH_INTERNAL",
+        0x06 => "INVALID_FEATURE_INDEX",
+        0x07 => "INVALID_FUNCTION_ID",
+        0x08 => "BUSY",
+        0x09 => "UNSUPPORTED",
+        _ => "UNKNOWN_ERROR",
     }
 }
 

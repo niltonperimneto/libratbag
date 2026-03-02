@@ -16,6 +16,8 @@ from .conftest import (
 )
 from .ratbag_dbus import RatbagDBusClient
 
+pytestmark = pytest.mark.requires_dev_hooks
+
 
 # ---------------------------------------------------------------------------
 # Helper
