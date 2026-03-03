@@ -41,6 +41,7 @@ impl RatbagButton {
 /// Allows parsing the DBus variant *before* acquiring the write lock,
 /// keeping the critical section as short as possible.
 enum ParsedMapping {
+    None,
     Macro(Vec<(u32, u32)>),
     Simple(u32),
 }
@@ -77,17 +78,35 @@ impl RatbagButton {
                 OwnedValue::try_from(Value::from(button.macro_entries.clone()))
                     .unwrap_or_else(|_| fallback_owned_value())
             }
-            _ => OwnedValue::try_from(Value::from(button.mapping_value))
-                .unwrap_or_else(|_| fallback_owned_value()),
+            ActionType::Button | ActionType::Special | ActionType::Key => {
+                OwnedValue::try_from(Value::from(button.mapping_value))
+                    .unwrap_or_else(|_| fallback_owned_value())
+            }
+            ActionType::None | ActionType::Unknown => {
+                OwnedValue::try_from(Value::from(0_u32))
+                    .unwrap_or_else(|_| fallback_owned_value())
+            }
         };
 
         (action_type, value)
     }
 
     #[zbus(property)]
-    async fn set_mapping(&self, mapping: (u32, OwnedValue)) {
+    async fn set_mapping(&self, mapping: (u32, OwnedValue)) -> zbus::Result<()> {
         let (action_type_raw, value) = mapping;
-        let action_type = ActionType::from_u32(action_type_raw);
+        let action_type = match action_type_raw {
+            0 => ActionType::None,
+            1 => ActionType::Button,
+            2 => ActionType::Special,
+            3 => ActionType::Key,
+            4 => ActionType::Macro,
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "Unsupported action type: {action_type_raw}"
+                ))
+                .into());
+            }
+        };
 
         /* Unwrap nested Variant wrappers: some DBus clients (e.g. Piper/GLib)
          * may send Value::Value(Value::U32(...)) instead of Value::U32(...). */
@@ -97,19 +116,44 @@ impl RatbagButton {
         }
 
         let parsed = match action_type {
+            ActionType::None => {
+                if matches!(inner, Value::U32(_)) {
+                    Some(ParsedMapping::None)
+                } else {
+                    tracing::warn!(
+                        "Button {}: expected U32 for None mapping, got {:?}",
+                        self.button_id,
+                        inner.value_signature(),
+                    );
+                    None
+                }
+            }
             ActionType::Macro => {
                 if let Value::Array(arr) = &inner {
-                    let entries: Vec<(u32, u32)> = arr
-                        .iter()
-                        .filter_map(|v| {
-                            if let Value::Structure(s) = v {
-                                if let [Value::U32(a), Value::U32(b)] = s.fields() {
-                                    return Some((*a, *b));
-                                }
-                            }
-                            None
-                        })
-                        .collect();
+                    let mut entries = Vec::with_capacity(arr.len());
+                    for value in arr.iter() {
+                        let Value::Structure(s) = value else {
+                            tracing::warn!(
+                                "Button {}: expected Struct(u32,u32) entries for Macro mapping",
+                                self.button_id,
+                            );
+                            return Err(zbus::fdo::Error::InvalidArgs(
+                                "Invalid macro entry type".into(),
+                            )
+                            .into());
+                        };
+                        let [Value::U32(a), Value::U32(b)] = s.fields() else {
+                            tracing::warn!(
+                                "Button {}: expected Struct(u32,u32) fields for Macro mapping",
+                                self.button_id,
+                            );
+                            return Err(zbus::fdo::Error::InvalidArgs(
+                                "Invalid macro entry fields".into(),
+                            )
+                            .into());
+                        };
+                        entries.push((*a, *b));
+                    }
                     Some(ParsedMapping::Macro(entries))
                 } else {
                     tracing::warn!(
@@ -120,7 +164,7 @@ impl RatbagButton {
                     None
                 }
             }
-            _ => {
+            ActionType::Button | ActionType::Special | ActionType::Key => {
                 if let Value::U32(val) = &inner {
                     Some(ParsedMapping::Simple(*val))
                 } else {
@@ -133,20 +177,40 @@ impl RatbagButton {
                     None
                 }
             }
+            ActionType::Unknown => None,
+        };
+
+        let Some(parsed) = parsed else {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "Invalid mapping payload for action type".into(),
+            )
+            .into());
         };
 
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(button) = profile.find_button_mut(self.button_id) {
-                button.action_type = action_type;
-                match parsed {
-                    Some(ParsedMapping::Macro(entries)) => button.macro_entries = entries,
-                    Some(ParsedMapping::Simple(val)) => button.mapping_value = val,
-                    None => {}
-                }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        let button = profile
+            .find_button_mut(self.button_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Button not found".into()))?;
+
+        button.action_type = action_type;
+        match parsed {
+            ParsedMapping::None => {
+                button.mapping_value = 0;
+                button.macro_entries.clear();
             }
-            profile.is_dirty = true;
+            ParsedMapping::Macro(entries) => {
+                button.macro_entries = entries;
+            }
+            ParsedMapping::Simple(val) => {
+                button.mapping_value = val;
+                button.macro_entries.clear();
+            }
         }
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// Supported action types for this button (constant).

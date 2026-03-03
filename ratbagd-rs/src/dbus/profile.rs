@@ -1,12 +1,18 @@
 /* DBus Profile interface: exposes per-profile properties (name, rate, angle snapping, debounce,
- * resolutions/buttons/leds lists) backed by shared DeviceInfo and optional actor commit hook. */
+ * capabilities, resolutions/buttons/leds lists) backed by shared DeviceInfo.
+ *
+ * Design principles:
+ * - Validate inputs *before* acquiring the write lock to keep critical sections short.
+ * - Clamp / reject invalid values using typed helpers on `ProfileInfo`.
+ * - Return `zbus::fdo::Result` from setters so callers see failures.
+ * - Emit `PropertiesChanged` signals for every mutated property plus `IsDirty`. */
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use zbus::interface;
 use zbus::zvariant::ObjectPath;
 
-use crate::device::DeviceInfo;
+use crate::device::{DeviceInfo, ProfileInfo};
 
 /// The `org.freedesktop.ratbag1.Profile` interface.
 ///
@@ -39,28 +45,54 @@ impl RatbagProfile {
 
 #[interface(name = "org.freedesktop.ratbag1.Profile")]
 impl RatbagProfile {
+    // ------------------------------------------------------------------
+    // Read-only constant properties
+    // ------------------------------------------------------------------
+
     /// Zero-based profile index (constant).
     #[zbus(property)]
     fn index(&self) -> u32 {
         self.profile_id
     }
 
-    /// Profile name (read-write). Empty string means name cannot be changed.
+    /// Profile capabilities (constant).
+    ///
+    /// Returns the subset of well-known profile capabilities
+    /// (`SET_DEFAULT` = 101, `DISABLE` = 102) that this profile supports,
+    /// matching the C daemon's `ratbagd_profile_get_capabilities`.
+    #[zbus(property)]
+    async fn capabilities(&self) -> Vec<u32> {
+        let info = self.device_info.read().await;
+        info.find_profile(self.profile_id)
+            .map(|p| p.dbus_capabilities())
+            .unwrap_or_default()
+    }
+
+    // ------------------------------------------------------------------
+    // Read-write properties
+    // ------------------------------------------------------------------
+
+    /// Profile name (read-write).
+    ///
+    /// The getter sanitises the raw name for safe DBus transport
+    /// (UTF-8 pass-through, ISO-8859-1 fallback, then ASCII-only).
     #[zbus(property)]
     async fn name(&self) -> String {
         let info = self.device_info.read().await;
         info.find_profile(self.profile_id)
-            .map(|p| p.name.clone())
+            .map(|p| ProfileInfo::sanitize_name(&p.name))
             .unwrap_or_default()
     }
 
     #[zbus(property)]
-    async fn set_name(&self, name: String) {
+    async fn set_name(&self, name: String) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.name = name;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.name = name;
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// True if this profile is disabled.
@@ -72,13 +104,19 @@ impl RatbagProfile {
     }
 
     #[zbus(property)]
-    async fn set_disabled(&self, disabled: bool) {
+    async fn set_disabled(&self, disabled: bool) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.is_enabled = !disabled;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.is_enabled = !disabled;
+        profile.is_dirty = true;
+        Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Read-only dynamic properties
+    // ------------------------------------------------------------------
 
     /// True if this is the active profile (read-only).
     #[zbus(property)]
@@ -95,6 +133,10 @@ impl RatbagProfile {
         info.find_profile(self.profile_id)
             .is_some_and(|p| p.is_dirty)
     }
+
+    // ------------------------------------------------------------------
+    // Child object paths
+    // ------------------------------------------------------------------
 
     /// Object paths to this profile's resolutions.
     #[zbus(property)]
@@ -156,6 +198,10 @@ impl RatbagProfile {
             .collect()
     }
 
+    // ------------------------------------------------------------------
+    // Angle snapping / debounce / report rate
+    // ------------------------------------------------------------------
+
     /// Sensor angle snapping (-1 = unsupported, 0 = off, 1 = on).
     #[zbus(property)]
     async fn angle_snapping(&self) -> i32 {
@@ -166,12 +212,14 @@ impl RatbagProfile {
     }
 
     #[zbus(property)]
-    async fn set_angle_snapping(&self, value: i32) {
+    async fn set_angle_snapping(&self, value: i32) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.angle_snapping = value;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.angle_snapping = value;
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// Button debounce time in ms (-1 = unsupported).
@@ -184,15 +232,17 @@ impl RatbagProfile {
     }
 
     #[zbus(property)]
-    async fn set_debounce(&self, value: i32) {
+    async fn set_debounce(&self, value: i32) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.debounce = value;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.debounce = value;
+        profile.is_dirty = true;
+        Ok(())
     }
 
-    /// Permitted debounce time values.
+    /// Permitted debounce time values (constant).
     #[zbus(property)]
     async fn debounces(&self) -> Vec<u32> {
         let info = self.device_info.read().await;
@@ -210,16 +260,25 @@ impl RatbagProfile {
             .unwrap_or(0)
     }
 
+    /// Set report rate in Hz.
+    ///
+    /// The value is clamped to [125, 8000] before storage, matching the
+    /// C daemon's sanity check.
     #[zbus(property)]
-    async fn set_report_rate(&self, rate: u32) {
+    async fn set_report_rate(&self, rate: u32) -> zbus::Result<()> {
+        /* Clamp *before* acquiring the write lock. */
+        let clamped = ProfileInfo::clamp_report_rate(rate);
+
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.report_rate = rate;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.report_rate = clamped;
+        profile.is_dirty = true;
+        Ok(())
     }
 
-    /// Permitted report rate values.
+    /// Permitted report rate values (constant).
     #[zbus(property)]
     async fn report_rates(&self) -> Vec<u32> {
         let info = self.device_info.read().await;
@@ -228,18 +287,25 @@ impl RatbagProfile {
             .unwrap_or_default()
     }
 
+    // ------------------------------------------------------------------
+    // Methods
+    // ------------------------------------------------------------------
+
     /// Set this profile as the active profile.
     ///
-    /// Deactivates all other profiles on the same device first.
-    async fn set_active(&self) {
+    /// Deactivates all other profiles on the same device first, then marks
+    /// this profile as active and dirty.
+    async fn set_active(&self) -> zbus::fdo::Result<()> {
         let mut info = self.device_info.write().await;
         for profile in &mut info.profiles {
             profile.is_active = false;
         }
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            profile.is_active = true;
-            profile.is_dirty = true;
-        }
+        let profile = info
+            .find_profile_mut(self.profile_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+        profile.is_active = true;
+        profile.is_dirty = true;
         tracing::info!("Profile {} set as active", self.profile_id);
+        Ok(())
     }
 }

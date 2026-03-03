@@ -35,17 +35,26 @@ const DPI_FN_SET_SENSOR_DPI: u8 = 0x03;
 const RATE_FN_GET_REPORT_RATE_LIST: u8 = 0x00;
 const RATE_FN_GET_REPORT_RATE: u8 = 0x01;
 
-/* Color LED Effects (0x8070) function IDs */
-const LED_FN_GET_ZONE_EFFECT: u8 = 0x01;
-const LED_FN_SET_ZONE_EFFECT: u8 = 0x02;
+/* Color LED Effects (0x8070) function IDs.
+ * C defines: GET_INFO=0x00, GET_ZONE_INFO=0x10, GET_ZONE_EFFECT_INFO=0x20,
+ *            SET_ZONE_EFFECT=0x30, GET_ZONE_EFFECT=0xE0.
+ * The address byte encodes (function << 4 | sw_id), so we store the function
+ * number in the upper nibble position: 0x30 → fn 3, 0xE0 → fn 14. */
+const LED_FN_GET_ZONE_EFFECT: u8 = 0x0E;
+const LED_FN_SET_ZONE_EFFECT: u8 = 0x03;
 
-/* Onboard Profiles (0x8100) function IDs */
+/* Onboard Profiles (0x8100) function IDs.
+ * C defines: GET_PROFILES_DESCR=0x00, SET_ONBOARD_MODE=0x10,
+ * GET_ONBOARD_MODE=0x20, SET_CURRENT_PROFILE=0x30,
+ * GET_CURRENT_PROFILE=0x40, MEMORY_READ=0x50,
+ * MEMORY_ADDR_WRITE=0x60, MEMORY_WRITE=0x70,
+ * MEMORY_WRITE_END=0x80. */
 const PROFILES_FN_GET_PROFILES_DESCR: u8 = 0x00;
 const PROFILES_FN_SET_MODE: u8 = 0x01;
-const PROFILES_FN_MEMORY_READ: u8 = 0x04;
-const PROFILES_FN_MEMORY_ADDR_WRITE: u8 = 0x05;
-const PROFILES_FN_MEMORY_WRITE: u8 = 0x06;
-const PROFILES_FN_MEMORY_WRITE_END: u8 = 0x07;
+const PROFILES_FN_MEMORY_READ: u8 = 0x05;
+const PROFILES_FN_MEMORY_ADDR_WRITE: u8 = 0x06;
+const PROFILES_FN_MEMORY_WRITE: u8 = 0x07;
+const PROFILES_FN_MEMORY_WRITE_END: u8 = 0x08;
 
 /* Onboard profile mode values for PROFILES_FN_SET_MODE */
 const ONBOARD_MODE_ONBOARD: u8 = 0x01;
@@ -121,16 +130,12 @@ impl Hidpp20DpiPayload {
 /* Feature 0x8060 (Adjustable Report Rate) */
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hidpp20ReportRatePayload {
-    pub data: u8, // Used for rate_bitmap or rate_ms
-    pub padding: [u8; 15],
+    pub data: u8, /* Used for rate_bitmap or rate_ms */
 }
 
 impl Hidpp20ReportRatePayload {
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
-        let data = buf[0];
-        let mut padding = [0u8; 15];
-        padding.copy_from_slice(&buf[1..16]);
-        Self { data, padding }
+        Self { data: buf[0] }
     }
 }
 
@@ -138,8 +143,7 @@ impl Hidpp20ReportRatePayload {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hidpp20LedGetZonePayload {
     pub zone_index: u8,
-    pub payload: [u8; crate::driver::hidpp::LED_PAYLOAD_SIZE], // 11 bytes
-    pub padding: [u8; 4],
+    pub payload: [u8; crate::driver::hidpp::LED_PAYLOAD_SIZE], /* 11 bytes */
 }
 
 impl Hidpp20LedGetZonePayload {
@@ -147,9 +151,7 @@ impl Hidpp20LedGetZonePayload {
         let zone_index = buf[0];
         let mut payload = [0u8; crate::driver::hidpp::LED_PAYLOAD_SIZE];
         payload.copy_from_slice(&buf[1..1+crate::driver::hidpp::LED_PAYLOAD_SIZE]);
-        let mut padding = [0u8; 4];
-        padding.copy_from_slice(&buf[1+crate::driver::hidpp::LED_PAYLOAD_SIZE..16]);
-        Self { zone_index, payload, padding }
+        Self { zone_index, payload }
     }
 }
 
@@ -264,33 +266,32 @@ impl Hidpp20ButtonBinding {
 /* Feature 0x8100: Onboard Profiles */
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hidpp20OnboardProfilesInfo {
-    pub memory_model: u8,
-    pub profile_format_id: u8,
-    pub macro_format_id: u8,
     pub profile_count: u8,
     pub profile_count_oob: u8,
     pub button_count: u8,
-    pub sector_count: u8,
-    pub sector_size: [u8; 2],  // Big Endian u16
-    pub mechanical_layout: u8,
-    pub reserved: [u8; 6],
+    pub sector_size: [u8; 2],  /* Big Endian u16 */
 }
 
 impl Hidpp20OnboardProfilesInfo {
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
-        let memory_model = buf[0];
-        let profile_format_id = buf[1];
-        let macro_format_id = buf[2];
+        /* Byte layout (see C struct hidpp20_onboard_profiles_desc):
+         *   [0] memory_model      – unused
+         *   [1] profile_format_id – unused
+         *   [2] macro_format_id   – unused
+         *   [3] profile_count
+         *   [4] profile_count_oob
+         *   [5] button_count
+         *   [6] sector_count      – unused
+         *   [7..9] sector_size    (BE u16)
+         *   [9] mechanical_layout – unused
+         *   [10..16] reserved     – unused
+         */
         let profile_count = buf[3];
         let profile_count_oob = buf[4];
         let button_count = buf[5];
-        let sector_count = buf[6];
         let mut sector_size = [0u8; 2];
         sector_size.copy_from_slice(&buf[7..9]);
-        let mechanical_layout = buf[9];
-        let mut reserved = [0u8; 6];
-        reserved.copy_from_slice(&buf[10..16]);
-        Self { memory_model, profile_format_id, macro_format_id, profile_count, profile_count_oob, button_count, sector_count, sector_size, mechanical_layout, reserved }
+        Self { profile_count, profile_count_oob, button_count, sector_size }
     }
     pub fn sector_size(&self) -> u16 {
         u16::from_be_bytes(self.sector_size)
@@ -298,19 +299,8 @@ impl Hidpp20OnboardProfilesInfo {
 }
 
 
-
-/* Protocol version stored after a successful probe. */
-#[derive(Debug, Clone, Copy, Default)]
-struct ProtocolVersion {
-    #[allow(dead_code)]
-    major: u8,
-    #[allow(dead_code)]
-    minor: u8,
-}
-
 pub struct Hidpp20Driver {
     device_index: u8,
-    version: ProtocolVersion,
     features: FeatureMap,
     cached_onboard_info: Option<Hidpp20OnboardProfilesInfo>,
     /* Cached hardware report rate (in Hz) read at probe time, used to skip
@@ -325,7 +315,6 @@ impl Hidpp20Driver {
     pub fn new() -> Self {
         Self {
             device_index: DEVICE_IDX_RECEIVER,
-            version: ProtocolVersion::default(),
             features: FeatureMap::default(),
             cached_onboard_info: None,
             cached_report_rate_hz: 0,
@@ -510,6 +499,68 @@ impl Hidpp20Driver {
         }
     }
 
+    /* Send a HID++ 2.0 short (7-byte) feature request with no parameters. */
+    /*                                                                      */
+    /* Used for commands like MEMORY_WRITE_END that the C driver sends as   */
+    /* `REPORT_ID_SHORT` with zero payload bytes.  The response matcher     */
+    /* accepts both Short and Long replies and HID++ errors.                */
+    async fn short_feature_request(
+        &self,
+        io: &mut DeviceIo,
+        feature_index: u8,
+        function: u8,
+    ) -> Result<()> {
+        let request = hidpp::build_hidpp20_short_request(
+            self.device_index,
+            feature_index,
+            function,
+            SW_ID,
+        );
+
+        enum Resp {
+            Ok,
+            HidppErr(u8),
+        }
+
+        let dev_idx = self.device_index;
+        let resp = io
+            .request(&request, 20, 3, move |buf| {
+                let report = HidppReport::parse(buf)?;
+
+                if let Some(code) =
+                    report.hidpp20_error_code(dev_idx, feature_index)
+                {
+                    return Some(Resp::HidppErr(code));
+                }
+
+                match &report {
+                    HidppReport::Long { device_index, sub_id, .. }
+                    | HidppReport::Short { device_index, sub_id, .. }
+                        if *device_index == dev_idx && *sub_id == feature_index =>
+                    {
+                        Some(Resp::Ok)
+                    }
+                    _ => None,
+                }
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Short feature request (idx=0x{feature_index:02X}, fn={function}) failed"
+                )
+            })?;
+
+        match resp {
+            Resp::Ok => Ok(()),
+            Resp::HidppErr(code) => {
+                let name = hidpp::hidpp20_error_name(code);
+                Err(anyhow::anyhow!(
+                    "HID++ error {name} (0x{code:02X}) for feature 0x{feature_index:02X} fn={function}"
+                ))
+            }
+        }
+    }
+
     /* Discover all supported features and cache their runtime indices. */
     async fn discover_features(&mut self, io: &mut DeviceIo) -> Result<()> {
         const FEATURE_QUERIES: &[(u16, &str)] = &[
@@ -684,8 +735,8 @@ impl Hidpp20Driver {
                 .context("Failed to write sector chunk")?;
         }
 
-        // 3. Finalize Write (using short report behavior emulation with 0 params)
-        self.feature_request(io, idx, PROFILES_FN_MEMORY_WRITE_END, &[0; 16])
+        /* 3. Finalize Write — C sends a SHORT report with no parameters. */
+        self.short_feature_request(io, idx, PROFILES_FN_MEMORY_WRITE_END)
             .await
             .context("Failed to end sector write")?;
 
@@ -1053,7 +1104,6 @@ impl super::DeviceDriver for Hidpp20Driver {
         for &idx in PROBE_INDICES {
             if let Some((major, minor)) = self.try_probe_index(io, idx).await {
                 self.device_index = idx;
-                self.version = ProtocolVersion { major, minor };
                 info!(
                     "HID++ 2.0 device detected at index 0x{idx:02X} (protocol {major}.{minor})"
                 );
@@ -1131,6 +1181,12 @@ impl super::DeviceDriver for Hidpp20Driver {
                 (0..profile_count).map(|i| (i as u16) + 1).collect();
             let mut profile_enabled: Vec<bool> = vec![true; profile_count];
 
+            /* Whether we should read user data from EEPROM sectors.
+             * If the profile directory CRC is invalid, we skip user sector
+             * reads entirely — matching the C driver's `read_userdata = false`
+             * fallback that reads ROM profiles instead of corrupted EEPROM. */
+            let read_userdata = root_crc_ok;
+
             if root_crc_ok {
                 for i in 0..profile_count {
                     let offset = i * 4;
@@ -1152,25 +1208,43 @@ impl super::DeviceDriver for Hidpp20Driver {
                 }
             } else {
                 warn!(
-                    "HID++ 2.0: profile dictionary CRC invalid; using default sector mapping (1..N)"
+                    "HID++ 2.0: profile dictionary CRC invalid; \
+                     skipping user sector reads, will use live hardware state"
                 );
             }
 
-            for i in 0..profile_count {
-                let addr = profile_addrs[i];
-                let enabled = profile_enabled[i];
+            if read_userdata {
+                for i in 0..profile_count {
+                    let addr = profile_addrs[i];
+                    let enabled = profile_enabled[i];
 
-                if addr == 0xFFFF || addr == 0 {
-                    continue;
-                }
+                    if addr == 0xFFFF || addr == 0 {
+                        continue;
+                    }
 
-                /* Read the profile payload from EEPROM. */
-                if let Ok(profile_data) = self.read_sector(io, idx, addr, 0, sector_size).await {
-                    /* Validate profile sector CRC (non-fatal: log and use data as-is,
-                     * mirroring legacy C driver which also continued on mismatch). */
+                    /* Read the profile payload from EEPROM. */
+                    let profile_data = match self.read_sector(io, idx, addr, 0, sector_size).await {
+                        Ok(data) => data,
+                        Err(e) => {
+                            warn!(
+                                "HID++ 2.0: failed to read profile sector 0x{addr:04X}: {e}; \
+                                 skipping profile {i}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    /* Validate profile sector CRC.  When it fails, skip parsing
+                     * the corrupted data — matching the C driver which returns
+                     * -EAGAIN and falls back to ROM for that profile. */
                     let crc_ok = Self::verify_sector_crc(addr, &profile_data);
                     if !crc_ok {
                         self.needs_eeprom_repair = true;
+                        warn!(
+                            "HID++ 2.0: profile {i} sector 0x{addr:04X} has bad CRC; \
+                             skipping EEPROM data, will use live hardware state"
+                        );
+                        continue;
                     }
 
                     let p = &mut info.profiles[i];

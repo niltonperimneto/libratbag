@@ -111,6 +111,7 @@ impl DeviceDriver for SteelseriesDriver {
                 angle_snapping: 0,
                 debounce: 0,
                 debounces: vec![],
+                capabilities: vec![],
                 resolutions: vec![],
                 buttons: vec![],
                 leds: vec![],

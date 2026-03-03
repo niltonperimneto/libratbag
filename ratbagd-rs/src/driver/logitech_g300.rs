@@ -145,6 +145,7 @@ impl DeviceDriver for LogitechG300Driver {
                 angle_snapping: -1,
                 debounce: -1,
                 debounces: Vec::new(),
+                capabilities: Vec::new(),
             };
 
             for res_id in 0..LOGITECH_G300_NUM_DPI {

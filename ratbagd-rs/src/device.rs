@@ -64,17 +64,21 @@ impl Color {
     }
 }
 
-/* LED effect modes matching the HID++ 2.0 protocol values. */
+/* LED effect modes exposed over DBus.
+ * Discriminant values 0–3 match the C daemon's ratbag_led_mode enum
+ * (Off=0, On=1, Cycle=2, Breathing=3) so that existing clients like
+ * Piper work without translation.  Values 4+ are Rust-only extensions
+ * for hardware modes not present in the C codebase. */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LedMode {
     Off = 0,
     Solid = 1,
-    Cycle = 3,
+    Cycle = 2,
+    Breathing = 3,
     ColorWave = 4,
     Starlight = 5,
-    Breathing = 10,
-    TriColor = 32,
+    TriColor = 6,
 }
 
 impl LedMode {
@@ -83,11 +87,11 @@ impl LedMode {
         match val {
             0 => Some(LedMode::Off),
             1 => Some(LedMode::Solid),
-            3 => Some(LedMode::Cycle),
+            2 => Some(LedMode::Cycle),
+            3 => Some(LedMode::Breathing),
             4 => Some(LedMode::ColorWave),
             5 => Some(LedMode::Starlight),
-            10 => Some(LedMode::Breathing),
-            32 => Some(LedMode::TriColor),
+            6 => Some(LedMode::TriColor),
             _ => None,
         }
     }
@@ -177,6 +181,7 @@ impl DeviceInfo {
                 angle_snapping: -1,
                 debounce: -1,
                 debounces: Vec::new(),
+                capabilities: Vec::new(),
                 resolutions: (0..num_dpis as u32)
                     .map(|ri| ResolutionInfo {
                         index: ri,
@@ -253,6 +258,22 @@ impl DeviceInfo {
     }
 }
 
+/* Profile capability constants matching libratbag's `ratbag_profile_capability` enum.
+ * Only SET_DEFAULT and DISABLE are exposed over DBus (matching the C daemon). */
+pub const RATBAG_PROFILE_CAP_SET_DEFAULT: u32 = 101;
+pub const RATBAG_PROFILE_CAP_DISABLE: u32 = 102;
+
+/* Resolution capability constants matching libratbag's `ratbag_resolution_capability` enum.
+ * SEPARATE_XY gates whether a (u32,u32) DPI tuple is accepted over DBus;
+ * DISABLE gates whether the is_disabled property can be toggled. */
+pub const RATBAG_RESOLUTION_CAP_INDIVIDUAL_REPORT_RATE: u32 = 1;
+pub const RATBAG_RESOLUTION_CAP_SEPARATE_XY_RESOLUTION: u32 = 2;
+pub const RATBAG_RESOLUTION_CAP_DISABLE: u32 = 3;
+
+/// Minimum and maximum allowed report rates (Hz) for sanity-clamping.
+pub const REPORT_RATE_MIN: u32 = 125;
+pub const REPORT_RATE_MAX: u32 = 8000;
+
 /// Profile state.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileInfo {
@@ -266,6 +287,7 @@ pub struct ProfileInfo {
     pub angle_snapping: i32,
     pub debounce: i32,
     pub debounces: Vec<u32>,
+    pub capabilities: Vec<u32>,
     pub resolutions: Vec<ResolutionInfo>,
     pub buttons: Vec<ButtonInfo>,
     pub leds: Vec<LedInfo>,
@@ -300,6 +322,49 @@ impl ProfileInfo {
     /// Find a mutable LED by its `index` field.
     pub fn find_led_mut(&mut self, id: u32) -> Option<&mut LedInfo> {
         self.leds.iter_mut().find(|l| l.index == id)
+    }
+
+    /// Clamp a report rate to the allowed range.
+    #[inline]
+    pub fn clamp_report_rate(rate: u32) -> u32 {
+        rate.clamp(REPORT_RATE_MIN, REPORT_RATE_MAX)
+    }
+
+    /// Return only the well-known profile capabilities (SET_DEFAULT, DISABLE)
+    /// that are present in this profile's capability list.
+    pub fn dbus_capabilities(&self) -> Vec<u32> {
+        const EXPOSED: &[u32] = &[RATBAG_PROFILE_CAP_SET_DEFAULT, RATBAG_PROFILE_CAP_DISABLE];
+        self.capabilities
+            .iter()
+            .copied()
+            .filter(|c| EXPOSED.contains(c))
+            .collect()
+    }
+
+    /// Sanitize a profile name for DBus transport.
+    ///
+    /// C-compatible policy: if the bytes are valid UTF-8, use them as-is;
+    /// otherwise attempt ISO-8859-1 → UTF-8 conversion; failing that,
+    /// strip non-ASCII bytes.
+    pub fn sanitize_name(raw: &str) -> String {
+        /* Rust strings are always valid UTF-8, so the first branch always
+         * holds for data originating from Rust.  The fallback paths exist
+         * for drivers that may stuff raw bytes into the name field via
+         * unsafe or FFI. */
+        if raw.is_ascii() || std::str::from_utf8(raw.as_bytes()).is_ok() {
+            return raw.to_owned();
+        }
+        /* Treat each byte as ISO-8859-1 code point → char (always valid). */
+        let latin1: String = raw.bytes().map(|b| b as char).collect();
+        if latin1.is_empty() {
+            /* If even that produced nothing, keep only ASCII. */
+            raw.bytes()
+                .filter(|b| b.is_ascii() && *b >= 0x20)
+                .map(|b| b as char)
+                .collect()
+        } else {
+            latin1
+        }
     }
 }
 

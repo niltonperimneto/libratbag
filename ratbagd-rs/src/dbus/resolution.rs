@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use zbus::interface;
 use zbus::zvariant::{OwnedValue, Value};
 
-use crate::device::{DeviceInfo, Dpi};
+use crate::device::{DeviceInfo, Dpi, RATBAG_RESOLUTION_CAP_SEPARATE_XY_RESOLUTION};
 
 use super::fallback_owned_value;
 
@@ -125,14 +125,22 @@ impl RatbagResolution {
     }
 
     #[zbus(property)]
-    async fn set_is_disabled(&self, disabled: bool) {
+    async fn set_is_disabled(&self, disabled: bool) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(res) = profile.find_resolution_mut(self.resolution_id) {
-                res.is_disabled = disabled;
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Resolution {} not found in profile {}",
+                self.resolution_id, self.profile_id
+            ))
+        })?;
+        res.is_disabled = disabled;
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// DPI value as a variant: either a `u32` or a `(u32, u32)` tuple.
@@ -157,28 +165,42 @@ impl RatbagResolution {
     }
 
     #[zbus(property)]
-    async fn set_resolution(&self, value: OwnedValue) {
+    async fn set_resolution(&self, value: OwnedValue) -> zbus::Result<()> {
         /* Parse the incoming value before taking the write lock to minimize hold time.
          * Piper and other clients may send the DPI as a plain u32, a (u32, u32)
          * tuple, or wrapped in an extra variant layer (when the property type is `v`). */
         let inner: Value<'_> = value.into();
-        let new_dpi = Self::parse_dpi_value(&inner);
+        let new_dpi = Self::parse_dpi_value(&inner).ok_or_else(|| {
+            zbus::fdo::Error::InvalidArgs(format!(
+                "Invalid resolution value: {inner:?}"
+            ))
+        })?;
 
-        if new_dpi.is_none() {
-            tracing::warn!(
-                "Invalid resolution value received over DBus: {inner:?}"
-            );
+        let mut info = self.device_info.write().await;
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Resolution {} not found in profile {}",
+                self.resolution_id, self.profile_id
+            ))
+        })?;
+
+        /* Reject (x, y) tuples when the device lacks the SEPARATE_XY capability. */
+        if matches!(new_dpi, Dpi::Separate { .. })
+            && !res.capabilities.contains(&RATBAG_RESOLUTION_CAP_SEPARATE_XY_RESOLUTION)
+        {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "Device does not support separate X/Y resolution".to_string(),
+            ).into());
         }
 
-        if let Some(dpi) = new_dpi {
-            let mut info = self.device_info.write().await;
-            if let Some(profile) = info.find_profile_mut(self.profile_id) {
-                if let Some(res) = profile.find_resolution_mut(self.resolution_id) {
-                    res.dpi = dpi;
-                }
-                profile.is_dirty = true;
-            }
-        }
+        res.dpi = new_dpi;
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// List of supported DPI values (constant).
@@ -194,42 +216,60 @@ impl RatbagResolution {
     /// Set this resolution as the active one.
     ///
     /// Deactivates all sibling resolutions in the same profile first.
-    async fn set_active(&self) {
+    /// Returns 0 on success (matching the C daemon's reply signature).
+    async fn set_active(&self) -> zbus::fdo::Result<u32> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            for res in &mut profile.resolutions {
-                res.is_active = false;
-            }
-            if let Some(res) = profile.find_resolution_mut(self.resolution_id) {
-                res.is_active = true;
-            }
-            profile.is_dirty = true;
-            tracing::info!(
-                "Resolution {} in profile {} set as active",
-                self.resolution_id,
-                self.profile_id,
-            );
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        for res in &mut profile.resolutions {
+            res.is_active = false;
         }
+        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Resolution {} not found in profile {}",
+                self.resolution_id, self.profile_id
+            ))
+        })?;
+        res.is_active = true;
+        profile.is_dirty = true;
+        tracing::info!(
+            "Resolution {} in profile {} set as active",
+            self.resolution_id,
+            self.profile_id,
+        );
+        Ok(0)
     }
 
     /// Set this resolution as the default one.
     ///
     /// Clears default on all sibling resolutions in the same profile first.
-    async fn set_default(&self) {
+    /// Returns 0 on success (matching the C daemon's reply signature).
+    async fn set_default(&self) -> zbus::fdo::Result<u32> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            for res in &mut profile.resolutions {
-                res.is_default = false;
-            }
-            if let Some(res) = profile.find_resolution_mut(self.resolution_id) {
-                res.is_default = true;
-            }
-            profile.is_dirty = true;
-            tracing::info!(
-                "Resolution {} in profile {} set as default",
-                self.resolution_id,
-                self.profile_id,
-            );
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        for res in &mut profile.resolutions {
+            res.is_default = false;
         }
+        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Resolution {} not found in profile {}",
+                self.resolution_id, self.profile_id
+            ))
+        })?;
+        res.is_default = true;
+        profile.is_dirty = true;
+        tracing::info!(
+            "Resolution {} in profile {} set as default",
+            self.resolution_id,
+            self.profile_id,
+        );
+        Ok(0)
     }
 }

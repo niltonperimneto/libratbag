@@ -74,12 +74,23 @@ impl RatbagLed {
             zbus::fdo::Error::InvalidArgs(format!("Invalid LedMode: {mode}"))
         })?;
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.mode = led_mode;
-            }
-            profile.is_dirty = true;
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        if !led.modes.contains(&led_mode) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "LedMode {} not supported by this LED", mode
+            )).into());
         }
+        led.mode = led_mode;
+        profile.is_dirty = true;
         Ok(())
     }
 
@@ -104,14 +115,21 @@ impl RatbagLed {
     }
 
     #[zbus(property)]
-    async fn set_color(&self, color: (u32, u32, u32)) {
+    async fn set_color(&self, color: (u32, u32, u32)) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.color = color_from_tuple(color);
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        led.color = color_from_tuple(color);
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// Secondary LED color for multi-color effects like Starlight (read-write).
@@ -125,14 +143,21 @@ impl RatbagLed {
     }
 
     #[zbus(property)]
-    async fn set_secondary_color(&self, color: (u32, u32, u32)) {
+    async fn set_secondary_color(&self, color: (u32, u32, u32)) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.secondary_color = color_from_tuple(color);
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        led.secondary_color = color_from_tuple(color);
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// Tertiary LED color for 3-zone effects like G203 TriColor (read-write).
@@ -146,14 +171,21 @@ impl RatbagLed {
     }
 
     #[zbus(property)]
-    async fn set_tertiary_color(&self, color: (u32, u32, u32)) {
+    async fn set_tertiary_color(&self, color: (u32, u32, u32)) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.tertiary_color = color_from_tuple(color);
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        led.tertiary_color = color_from_tuple(color);
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// Color depth enum (constant).
@@ -177,14 +209,21 @@ impl RatbagLed {
     }
 
     #[zbus(property)]
-    async fn set_effect_duration(&self, duration: u32) {
+    async fn set_effect_duration(&self, duration: u32) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.effect_duration = duration.min(10000);
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        led.effect_duration = duration.min(10000);
+        profile.is_dirty = true;
+        Ok(())
     }
 
     /// LED brightness, 0-255 (read-write).
@@ -198,13 +237,20 @@ impl RatbagLed {
     }
 
     #[zbus(property)]
-    async fn set_brightness(&self, brightness: u32) {
+    async fn set_brightness(&self, brightness: u32) -> zbus::Result<()> {
         let mut info = self.device_info.write().await;
-        if let Some(profile) = info.find_profile_mut(self.profile_id) {
-            if let Some(led) = profile.find_led_mut(self.led_id) {
-                led.brightness = brightness.min(255);
-            }
-            profile.is_dirty = true;
-        }
+        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Profile {} not found", self.profile_id
+            ))
+        })?;
+        let led = profile.find_led_mut(self.led_id).ok_or_else(|| {
+            zbus::fdo::Error::Failed(format!(
+                "Led {} not found in profile {}", self.led_id, self.profile_id
+            ))
+        })?;
+        led.brightness = brightness.min(255);
+        profile.is_dirty = true;
+        Ok(())
     }
 }

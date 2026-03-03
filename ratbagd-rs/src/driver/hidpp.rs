@@ -67,20 +67,6 @@ pub const LED_HW_MODE_COLOR_WAVE: u8 = 0x04;
 pub const LED_HW_MODE_STARLIGHT: u8 = 0x05;
 pub const LED_HW_MODE_BREATHING: u8 = 0x0A;
 
-/* 0x8070 Color LED Effects command IDs */
-#[allow(dead_code)]
-pub const CMD_COLOR_LED_EFFECTS_GET_ZONE_EFFECT: u8 = 0x01;
-#[allow(dead_code)]
-pub const CMD_COLOR_LED_EFFECTS_SET_ZONE_EFFECT: u8 = 0x02;
-
-/* 0x8071 RGB Effects command IDs */
-#[allow(dead_code)]
-pub const CMD_RGB_EFFECTS_GET_INFO: u8 = 0x00;
-#[allow(dead_code)]
-pub const CMD_RGB_EFFECTS_SET_CLUSTER_EFFECT: u8 = 0x01;
-#[allow(dead_code)]
-pub const CMD_RGB_EFFECTS_SET_MULTI_LED_PATTERN: u8 = 0x02;
-
 /* Size of the internal LED payload as defined in C struct hidpp20_internal_led. */
 pub const LED_PAYLOAD_SIZE: usize = 11;
 
@@ -342,6 +328,28 @@ pub fn build_hidpp20_request(
     buf
 }
 
+/* Build a HID++ 2.0 short feature request (7 bytes). */
+/*  */
+/* Mirrors the C `REPORT_ID_SHORT` requests used for parameter-free */
+/* commands like MEMORY_WRITE_END.  Layout:                         */
+/* `[0x10, device_idx, feature_idx, (function << 4 | sw_id), 0, 0, 0]` */
+pub fn build_hidpp20_short_request(
+    device_index: u8,
+    feature_index: u8,
+    function: u8,
+    sw_id: u8,
+) -> [u8; 7] {
+    [
+        REPORT_ID_SHORT,
+        device_index,
+        feature_index,
+        (function << 4) | (sw_id & 0x0F),
+        0,
+        0,
+        0,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +582,51 @@ mod tests {
         assert_eq!(p[7], 0);
         assert_eq!(p[8], 0);
         assert_eq!(p[9], 255);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Short request builder tests                                        */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn build_short_request_encoding() {
+        let req = build_hidpp20_short_request(0xFF, 0x05, 0x08, 0x04);
+        assert_eq!(req[0], REPORT_ID_SHORT);
+        assert_eq!(req[1], 0xFF);   /* device index */
+        assert_eq!(req[2], 0x05);   /* feature index */
+        /* function=0x08, sw_id=0x04 → (0x08 << 4) | 0x04 = 0x84 */
+        assert_eq!(req[3], 0x84);
+        assert_eq!(req[4], 0x00);   /* zero params */
+        assert_eq!(req[5], 0x00);
+        assert_eq!(req[6], 0x00);
+        assert_eq!(req.len(), 7);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Opcode alignment with C driver (compile-time sanity)               */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn led_hw_mode_constants_match_c() {
+        /* C: hidpp20_color_led_zone_effect enum values */
+        assert_eq!(LED_HW_MODE_OFF, 0x00);
+        assert_eq!(LED_HW_MODE_FIXED, 0x01);
+        assert_eq!(LED_HW_MODE_CYCLE, 0x03);
+        assert_eq!(LED_HW_MODE_COLOR_WAVE, 0x04);
+        assert_eq!(LED_HW_MODE_STARLIGHT, 0x05);
+        assert_eq!(LED_HW_MODE_BREATHING, 0x0A);
+    }
+
+    #[test]
+    fn crc_ccitt_empty_is_seed() {
+        /* With no data the CRC should remain at the seed value 0xFFFF. */
+        assert_eq!(compute_ccitt_crc(&[]), 0xFFFF);
+    }
+
+    #[test]
+    fn crc_ccitt_known_vector() {
+        /* "123456789" is the standard CRC-CCITT test vector → 0x29B1. */
+        let data = b"123456789";
+        assert_eq!(compute_ccitt_crc(data), 0x29B1);
     }
 }

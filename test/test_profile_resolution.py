@@ -135,6 +135,27 @@ class TestProfile:
         dbus_client.set_profile_report_rate(profile, 250)
         assert dbus_client.profile_is_dirty(profile) is True
 
+    def test_profile_capabilities_list(self, dbus_client: RatbagDBusClient):
+        """Capabilities should be a (possibly empty) list of u32 values."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        caps = dbus_client.profile_capabilities(profile)
+        assert isinstance(caps, list)
+
+    def test_report_rate_clamped_low(self, dbus_client: RatbagDBusClient):
+        """Report rate below 125 should be clamped to 125."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        dbus_client.set_profile_report_rate(profile, 50)
+        assert dbus_client.profile_report_rate(profile) == 125
+
+    def test_report_rate_clamped_high(self, dbus_client: RatbagDBusClient):
+        """Report rate above 8000 should be clamped to 8000."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        dbus_client.set_profile_report_rate(profile, 99999)
+        assert dbus_client.profile_report_rate(profile) == 8000
+
     def test_set_active_profile(self, dbus_client: RatbagDBusClient):
         """SetActive should switch the active profile."""
         path = _load_and_get_device(dbus_client, MULTI_PROFILE_DEVICE_JSON)

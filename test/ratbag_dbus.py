@@ -194,6 +194,10 @@ class RatbagDBusClient:
     def profile_set_active(self, path: str):
         self._call_method(path, PROFILE_IFACE, "SetActive")
 
+    def profile_capabilities(self, path: str) -> list[int]:
+        caps = self._get_property(path, PROFILE_IFACE, "Capabilities")
+        return [int(c) for c in caps]
+
     # ------------------------------------------------------------------
     # Resolution interface
     # ------------------------------------------------------------------

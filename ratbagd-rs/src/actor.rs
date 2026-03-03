@@ -74,8 +74,20 @@ impl DeviceActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 ActorMessage::Commit { reply } => {
-                    let info = self.info.read().await;
-                    let result = self.driver.commit(&mut self.io, &info).await;
+                    /* Snapshot the shared state under a short read-lock so
+                     * the lock is NOT held across the potentially slow
+                     * hardware I/O, keeping DBus property reads unblocked. */
+                    let snapshot = self.info.read().await.clone();
+                    let result = self.driver.commit(&mut self.io, &snapshot).await;
+
+                    if result.is_ok() {
+                        /* Clear dirty flags under a brief write-lock. */
+                        let mut info = self.info.write().await;
+                        for profile in &mut info.profiles {
+                            profile.is_dirty = false;
+                        }
+                    }
+
                     let response = result.map_err(|e| format!("{e:#}"));
                     let _ = reply.send(response);
                 }

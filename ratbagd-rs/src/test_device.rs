@@ -280,6 +280,7 @@ pub mod spec {
                     angle_snapping: -1,
                     debounce: -1,
                     debounces: Vec::new(),
+                    capabilities: Vec::new(),
                     resolutions,
                     buttons,
                     leds,

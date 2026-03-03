@@ -7,6 +7,7 @@ brightness, and effect duration on injected test devices.
 
 import time
 
+import dbus
 import pytest
 
 from .conftest import SIMPLE_DEVICE_JSON, MULTI_PROFILE_DEVICE_JSON
@@ -27,9 +28,11 @@ ACTION_MACRO = 4
 
 LED_OFF = 0
 LED_SOLID = 1
-LED_CYCLE = 3
+LED_CYCLE = 2
 LED_COLOR_WAVE = 4
-LED_BREATHING = 10
+LED_STARLIGHT = 5
+LED_BREATHING = 3
+LED_TRICOLOR = 6
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +136,45 @@ class TestButton:
         mapping = dbus_client.button_mapping(buttons[0])
         assert int(mapping[0]) == ACTION_NONE
 
+    def test_set_button_mapping_none_normalizes_value(
+        self, dbus_client: RatbagDBusClient
+    ):
+        """None action should always expose value 0 in Mapping."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        buttons = dbus_client.profile_buttons(profile)
+        dbus_client.set_button_mapping(buttons[0], ACTION_NONE, 12345)
+        mapping = dbus_client.button_mapping(buttons[0])
+        assert int(mapping[0]) == ACTION_NONE
+        assert int(mapping[1]) == 0
+
+    def test_set_button_mapping_macro(self, dbus_client: RatbagDBusClient):
+        """Setting a button to Macro action type should persist."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        buttons = dbus_client.profile_buttons(profile)
+        events = [(1, 30), (2, 30), (3, 50)]
+        dbus_client.set_button_mapping(buttons[0], ACTION_MACRO, events)
+        mapping = dbus_client.button_mapping(buttons[0])
+        assert int(mapping[0]) == ACTION_MACRO
+        assert [(int(a), int(b)) for a, b in mapping[1]] == events
+
+    def test_set_button_mapping_unknown_type_rejected(
+        self, dbus_client: RatbagDBusClient
+    ):
+        """Unsupported action type should be rejected and not mutate state."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        buttons = dbus_client.profile_buttons(profile)
+        before = dbus_client.button_mapping(buttons[0])
+
+        with pytest.raises(dbus.exceptions.DBusException):
+            dbus_client.set_button_mapping(buttons[0], 999, 1)
+
+        after = dbus_client.button_mapping(buttons[0])
+        assert int(after[0]) == int(before[0])
+        assert int(after[1]) == int(before[1])
+
     def test_button_none_in_multi_profile(self, dbus_client: RatbagDBusClient):
         """Third profile's button should have action type None."""
         path = _load_and_get_device(dbus_client, MULTI_PROFILE_DEVICE_JSON)
@@ -183,6 +225,25 @@ class TestLed:
         leds = dbus_client.profile_leds(profile)
         dbus_client.set_led_mode(leds[0], LED_BREATHING)
         assert dbus_client.led_mode(leds[0]) == LED_BREATHING
+
+    def test_set_led_mode_invalid_rejected(self, dbus_client: RatbagDBusClient):
+        """Setting a completely invalid mode number should raise an error."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        leds = dbus_client.profile_leds(profile)
+        with pytest.raises(Exception):
+            dbus_client.set_led_mode(leds[0], 9999)
+
+    def test_set_led_mode_unsupported_rejected(self, dbus_client: RatbagDBusClient):
+        """Setting a valid mode not in the device's modes list should fail."""
+        path = _load_and_get_device(dbus_client, SIMPLE_DEVICE_JSON)
+        profile = _first_profile(dbus_client, path)
+        leds = dbus_client.profile_leds(profile)
+        modes = dbus_client.led_modes(leds[0])
+        # LED_TRICOLOR is a valid LedMode but not in test device's modes list
+        assert LED_TRICOLOR not in modes
+        with pytest.raises(Exception):
+            dbus_client.set_led_mode(leds[0], LED_TRICOLOR)
 
     def test_led_color_initial(self, dbus_client: RatbagDBusClient):
         """LED color should match the spec (255, 0, 0)."""

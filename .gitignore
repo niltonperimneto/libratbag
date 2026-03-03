@@ -11,3 +11,8 @@ ratbagctl-rs/target/*
 .agents/
 .github/
 test/
+*.c
+*.h
+.claude/skills/linux-driver/SKILL.md
+.claude/rules/rust-linux-devel.instructions.md
+.gitignore
