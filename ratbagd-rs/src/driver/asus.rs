@@ -106,14 +106,16 @@ struct AsusButtonEntry {
     kind: AsusButtonKind,
 }
 
-/* Special action values used by DBus / ratbag. Must stay in sync with the
- * ratbag_button_action_special enum values used in the rest of the daemon. */
-const SPECIAL_WHEEL_UP:      u32 = 1;
-const SPECIAL_WHEEL_DOWN:    u32 = 2;
-const SPECIAL_WHEEL_RIGHT:   u32 = 3;
-const SPECIAL_WHEEL_LEFT:    u32 = 4;
-const SPECIAL_RES_CYCLE_UP:  u32 = 5;
-const SPECIAL_RES_ALTERNATE: u32 = 6;
+/* Special action values: re-export from the shared canonical module so that
+ * all drivers and DBus clients agree on the same numeric encoding (matching
+ * the C libratbag `ratbag_button_action_special` enum, base = 1 << 30). */
+use crate::device::special_action;
+const SPECIAL_WHEEL_UP:      u32 = special_action::WHEEL_UP;
+const SPECIAL_WHEEL_DOWN:    u32 = special_action::WHEEL_DOWN;
+const SPECIAL_WHEEL_RIGHT:   u32 = special_action::WHEEL_RIGHT;
+const SPECIAL_WHEEL_LEFT:    u32 = special_action::WHEEL_LEFT;
+const SPECIAL_RES_CYCLE_UP:  u32 = special_action::RESOLUTION_CYCLE_UP;
+const SPECIAL_RES_ALTERNATE: u32 = special_action::RESOLUTION_ALTERNATE;
 
 /* This table mirrors ASUS_BUTTON_MAPPING[] from asus.h, translated into
  * idiomatic Rust. Order is intentional: the C code iterates in order to

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::device::DeviceInfo;
 use crate::driver::{DeviceDriver, DeviceIo};
@@ -74,9 +74,13 @@ impl DeviceActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 ActorMessage::Commit { reply } => {
-                    /* Snapshot the shared state under a short read-lock so
-                     * the lock is NOT held across the potentially slow
-                     * hardware I/O, keeping DBus property reads unblocked. */
+                    /* Clone a snapshot of the device state and release the
+                     * lock immediately.  This prevents write-starvation:
+                     * if the commit takes a long time (wireless retries,
+                     * EEPROM writes), concurrent DBus writers are not
+                     * blocked waiting for the read-lock to be released.
+                     * The ~1.6 µs clone cost is negligible compared to the
+                     * multi-millisecond hardware I/O that follows. */
                     let snapshot = self.info.read().await.clone();
                     let result = self.driver.commit(&mut self.io, &snapshot).await;
 
@@ -85,6 +89,29 @@ impl DeviceActor {
                         let mut info = self.info.write().await;
                         for profile in &mut info.profiles {
                             profile.is_dirty = false;
+                        }
+                    }
+
+                    /* Process any unsolicited hardware events (e.g. profile
+                     * switch notifications) that arrived during the commit's
+                     * I/O calls.  These were buffered by DeviceIo::request()
+                     * because they didn't match the pending command. */
+                    let events = self.io.drain_events();
+                    if !events.is_empty() {
+                        let mut info = self.info.write().await;
+                        for event in &events {
+                            match self.driver.handle_event(event, &mut info).await {
+                                Ok(true) => {
+                                    debug!(
+                                        "Unsolicited event updated device state: {:02x?}",
+                                        event
+                                    );
+                                }
+                                Ok(false) => { /* event was recognised but no state change */ }
+                                Err(e) => {
+                                    warn!("Error handling unsolicited event: {e}");
+                                }
+                            }
                         }
                     }
 

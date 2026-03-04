@@ -72,7 +72,7 @@ Installing libratbag from system packages
 
 libratbag is packaged for some distributions, you can use your system's
 package manager to install it. See [the
-wiki](https://github.com/libratbag/libratbag/wiki/Installation) for details.
+wiki](https://github.com/niltonperimneto/libratbag/wiki/Installation) for details.
 
 Build Requirements
 ------------------

@@ -9,6 +9,8 @@ use zbus::zvariant::ObjectPath;
 use crate::actor::ActorHandle;
 use crate::device::DeviceInfo;
 
+use super::profile::RatbagProfile;
+
 /// The `org.freedesktop.ratbag1.Device` interface.
 ///
 /// Each connected mouse has one Device object registered on the DBus bus.
@@ -67,8 +69,13 @@ impl RatbagDevice {
     /// Commit pending changes to the device hardware.
     ///
     /// Returns 0 on success. On failure, the `Resync` signal is emitted.
+    /// After a successful commit the actor clears all dirty flags; we then
+    /// emit `PropertiesChanged` for `IsDirty` on each profile so that
+    /// listening frontends (Piper, ratbagctl) see the updated state
+    /// without having to poll or restart.
     async fn commit(
         &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> u32 {
         let Some(ref actor) = self.actor else {
@@ -79,6 +86,22 @@ impl RatbagDevice {
         match actor.commit().await {
             Ok(()) => {
                 tracing::info!("Commit succeeded for {}", self.path);
+
+                /* Notify frontends that dirty flags have been cleared. */
+                let info = self.info.read().await;
+                for prof in &info.profiles {
+                    let path = format!("{}/p{}", self.path, prof.index);
+                    if let Ok(iface_ref) =
+                        server.interface::<_, RatbagProfile>(path.as_str()).await
+                    {
+                        let _ = iface_ref
+                            .get()
+                            .await
+                            .is_dirty_changed(iface_ref.signal_emitter())
+                            .await;
+                    }
+                }
+
                 0
             }
             Err(e) => {

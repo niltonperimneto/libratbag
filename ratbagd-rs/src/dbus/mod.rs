@@ -75,6 +75,7 @@ async fn register_device_on_dbus(
             let res_path = format!("{device_path}/p{}/r{}", prof.index, res.index);
             let res_obj = resolution::RatbagResolution::new(
                 Arc::clone(&shared_info),
+                device_path.to_owned(),
                 prof.index,
                 res.index,
             );

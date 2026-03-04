@@ -294,17 +294,69 @@ impl RatbagProfile {
     /// Set this profile as the active profile.
     ///
     /// Deactivates all other profiles on the same device first, then marks
-    /// this profile as active and dirty.
-    async fn set_active(&self) -> zbus::fdo::Result<()> {
-        let mut info = self.device_info.write().await;
-        for profile in &mut info.profiles {
-            profile.is_active = false;
+    /// this profile as active and dirty.  Emits `PropertiesChanged` for
+    /// `IsActive` on every affected profile so that listening frontends
+    /// (e.g. Piper) update immediately without a restart.
+    async fn set_active(
+        &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
+    ) -> zbus::fdo::Result<()> {
+        let old_active_id;
+        {
+            let mut info = self.device_info.write().await;
+            old_active_id = info
+                .profiles
+                .iter()
+                .find(|p| p.is_active)
+                .map(|p| p.index);
+            for profile in &mut info.profiles {
+                profile.is_active = false;
+            }
+            let profile = info
+                .find_profile_mut(self.profile_id)
+                .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
+            profile.is_active = true;
+            profile.is_dirty = true;
         }
-        let profile = info
-            .find_profile_mut(self.profile_id)
-            .ok_or_else(|| zbus::fdo::Error::Failed("Profile not found".into()))?;
-        profile.is_active = true;
-        profile.is_dirty = true;
+        /* Lock released — now emit PropertiesChanged signals.         */
+        /*                                                              */
+        /* We notify the previously-active profile (IsActive → false)   */
+        /* and the newly-active profile (IsActive → true, IsDirty →     */
+        /* true).  Each signal must be emitted through the              */
+        /* SignalEmitter of the *correct* object path, obtained from    */
+        /* the ObjectServer's InterfaceRef for that path.               */
+
+        if let Some(old_id) = old_active_id {
+            if old_id != self.profile_id {
+                let path = format!("{}/p{}", self.device_path, old_id);
+                if let Ok(iface_ref) =
+                    server.interface::<_, RatbagProfile>(path.as_str()).await
+                {
+                    let _ = iface_ref
+                        .get()
+                        .await
+                        .is_active_changed(iface_ref.signal_emitter())
+                        .await;
+                }
+            }
+        }
+
+        let new_path = format!("{}/p{}", self.device_path, self.profile_id);
+        if let Ok(iface_ref) =
+            server.interface::<_, RatbagProfile>(new_path.as_str()).await
+        {
+            let _ = iface_ref
+                .get()
+                .await
+                .is_active_changed(iface_ref.signal_emitter())
+                .await;
+            let _ = iface_ref
+                .get()
+                .await
+                .is_dirty_changed(iface_ref.signal_emitter())
+                .await;
+        }
+
         tracing::info!("Profile {} set as active", self.profile_id);
         Ok(())
     }

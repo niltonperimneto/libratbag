@@ -227,9 +227,10 @@ impl DeviceDriver for LogitechG300Driver {
                         }
                     }
                     crate::device::ActionType::Special => {
+                        use crate::device::special_action as sa;
                         match btn.mapping_value {
-                            2 => data.code = 0x0A, // RES_UP
-                            3 => data.code = 0x0B, // RES_DOWN
+                            sa::RESOLUTION_UP => data.code = 0x0A,
+                            sa::RESOLUTION_DOWN => data.code = 0x0B,
                             _ => data.code = 0x0C, // Generic Special
                         }
                     }

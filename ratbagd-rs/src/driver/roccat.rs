@@ -220,28 +220,31 @@ pub struct RoccatDriver {
     cached_profiles: [Option<RoccatProfileReport>; (ROCCAT_PROFILE_MAX + 1) as usize],
 }
 
-/* Translate a raw Roccat bytecode to a unified (ActionType, mapping_value). */
+/* Translate a raw Roccat bytecode to a unified (ActionType, mapping_value).
+ * mapping_value for Special actions uses the canonical constants from
+ * crate::device::special_action (matching the C libratbag enum). */
 #[allow(dead_code)]
 fn roccat_raw_to_action(raw: u8) -> (crate::device::ActionType, u32) {
     use crate::device::ActionType;
+    use crate::device::special_action as sa;
     match raw {
         1 => (ActionType::Button, 1),
         2 => (ActionType::Button, 2),
         3 => (ActionType::Button, 3),
-        4 => (ActionType::Special, 1), // DOUBLECLICK
+        4 => (ActionType::Special, sa::DOUBLECLICK),
         6 => (ActionType::None, 0),
         7 => (ActionType::Button, 4),
         8 => (ActionType::Button, 5),
-        9 => (ActionType::Special, 2), // WHEEL_LEFT
-        10 => (ActionType::Special, 3), // WHEEL_RIGHT
-        13 => (ActionType::Special, 4), // WHEEL_UP
-        14 => (ActionType::Special, 5), // WHEEL_DOWN
-        16 => (ActionType::Special, 6), // PROFILE_CYCLE_UP
-        17 => (ActionType::Special, 7), // PROFILE_UP
-        18 => (ActionType::Special, 8), // PROFILE_DOWN
-        20 => (ActionType::Special, 9), // RESOLUTION_CYCLE_UP
-        21 => (ActionType::Special, 10), // RESOLUTION_UP
-        22 => (ActionType::Special, 11), // RESOLUTION_DOWN
+        9 => (ActionType::Special, sa::WHEEL_LEFT),
+        10 => (ActionType::Special, sa::WHEEL_RIGHT),
+        13 => (ActionType::Special, sa::WHEEL_UP),
+        14 => (ActionType::Special, sa::WHEEL_DOWN),
+        16 => (ActionType::Special, sa::PROFILE_CYCLE_UP),
+        17 => (ActionType::Special, sa::PROFILE_UP),
+        18 => (ActionType::Special, sa::PROFILE_DOWN),
+        20 => (ActionType::Special, sa::RESOLUTION_CYCLE_UP),
+        21 => (ActionType::Special, sa::RESOLUTION_UP),
+        22 => (ActionType::Special, sa::RESOLUTION_DOWN),
         26 => (ActionType::Key, 125), // KEY_LEFTMETA
         32 => (ActionType::Key, 171), // KEY_CONFIG
         33 => (ActionType::Key, 163), // KEY_PREVIOUSSONG
@@ -252,7 +255,7 @@ fn roccat_raw_to_action(raw: u8) -> (crate::device::ActionType, u32) {
         38 => (ActionType::Key, 115), // KEY_VOLUMEUP
         39 => (ActionType::Key, 114), // KEY_VOLUMEDOWN
         48 => (ActionType::Macro, 0),
-        65 => (ActionType::Special, 20), // SECOND_MODE
+        65 => (ActionType::Special, sa::SECOND_MODE),
         _ => (ActionType::Unknown, raw as u32),
     }
 }
@@ -261,23 +264,24 @@ fn roccat_raw_to_action(raw: u8) -> (crate::device::ActionType, u32) {
 #[allow(dead_code)]
 fn roccat_action_to_raw(action: crate::device::ActionType, val: u32) -> u8 {
     use crate::device::ActionType;
+    use crate::device::special_action as sa;
     match (action, val) {
         (ActionType::Button, 1) => 1,
         (ActionType::Button, 2) => 2,
         (ActionType::Button, 3) => 3,
         (ActionType::Button, 4) => 7,
         (ActionType::Button, 5) => 8,
-        (ActionType::Special, 1) => 4,
-        (ActionType::Special, 2) => 9,
-        (ActionType::Special, 3) => 10,
-        (ActionType::Special, 4) => 13,
-        (ActionType::Special, 5) => 14,
-        (ActionType::Special, 6) => 16,
-        (ActionType::Special, 7) => 17,
-        (ActionType::Special, 8) => 18,
-        (ActionType::Special, 9) => 20,
-        (ActionType::Special, 10) => 21,
-        (ActionType::Special, 11) => 22,
+        (ActionType::Special, sa::DOUBLECLICK) => 4,
+        (ActionType::Special, sa::WHEEL_LEFT) => 9,
+        (ActionType::Special, sa::WHEEL_RIGHT) => 10,
+        (ActionType::Special, sa::WHEEL_UP) => 13,
+        (ActionType::Special, sa::WHEEL_DOWN) => 14,
+        (ActionType::Special, sa::PROFILE_CYCLE_UP) => 16,
+        (ActionType::Special, sa::PROFILE_UP) => 17,
+        (ActionType::Special, sa::PROFILE_DOWN) => 18,
+        (ActionType::Special, sa::RESOLUTION_CYCLE_UP) => 20,
+        (ActionType::Special, sa::RESOLUTION_UP) => 21,
+        (ActionType::Special, sa::RESOLUTION_DOWN) => 22,
         (ActionType::Key, 125) => 26,
         (ActionType::Key, 171) => 32,
         (ActionType::Key, 163) => 33,
@@ -288,7 +292,7 @@ fn roccat_action_to_raw(action: crate::device::ActionType, val: u32) -> u8 {
         (ActionType::Key, 115) => 38,
         (ActionType::Key, 114) => 39,
         (ActionType::Macro, _) => 48,
-        (ActionType::Special, 20) => 65,
+        (ActionType::Special, sa::SECOND_MODE) => 65,
         (ActionType::None, _) => 6,
         (ActionType::Unknown, raw) => raw as u8,
         _ => 6, // Fallback to None

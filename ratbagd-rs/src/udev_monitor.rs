@@ -1,9 +1,20 @@
-/* udev hotplug monitor: enumerates existing hidraw devices and dispatches add/remove (and dev-hook
- * test inject/remove) actions to the main DBus loop from a blocking thread. */
+/* udev hotplug monitor: enumerates existing hidraw devices and dispatches
+ * add/remove (and dev-hook test inject/remove) actions to the main DBus
+ * loop from a blocking thread.
+ *
+ * The `udev` crate types contain raw pointers and are not `Send`, so all
+ * udev operations run synchronously inside `spawn_blocking`.  The blocking
+ * thread cooperates with the async runtime by treating a closed `mpsc`
+ * channel as the shutdown signal — when the DBus server drops its receiver
+ * the monitor exits cleanly without requiring an extra cancellation
+ * primitive. */
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /* Actions dispatched from the udev monitor to the DBus server. */
 #[derive(Debug)]
@@ -19,85 +30,113 @@ pub enum DeviceAction {
     Remove {
         sysname: String,
     },
-    /// Inject a synthetic test device directly into the DBus layer.
-    ///
-    /// Only constructed when the `dev-hooks` feature is enabled.
+    /* Inject a synthetic test device directly into the DBus layer.
+     * Only constructed when the `dev-hooks` feature is enabled. */
     #[cfg(feature = "dev-hooks")]
     InjectTest {
         sysname: String,
         device_info: crate::device::DeviceInfo,
     },
-    /// Remove a previously-injected test device.
-    ///
-    /// Only constructed when the `dev-hooks` feature is enabled.
+    /* Remove a previously-injected test device.
+     * Only constructed when the `dev-hooks` feature is enabled. */
     #[cfg(feature = "dev-hooks")]
     RemoveTest {
         sysname: String,
     },
 }
 
-/* Run the udev monitor: enumerate existing hidraw devices, then watch */
-/* for hotplug events indefinitely. */
-/*  */
-/* The `udev` crate types contain raw pointers and are not `Send`, */
-/* so all udev operations run synchronously inside a blocking thread. */
-pub async fn run(tx: mpsc::Sender<DeviceAction>) {
+/* Run the udev monitor: enumerate existing hidraw devices, then watch
+ * for hotplug events indefinitely.
+ *
+ * Returns `Ok(())` when the channel receiver is dropped (clean shutdown)
+ * or an `Err` if a udev syscall fails.  The caller in `main.rs` joins
+ * this future inside `tokio::select!` so that either outcome surfaces. */
+pub async fn run(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
     info!("udev monitor started, watching for hidraw devices");
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_blocking(tx)
-    })
-    .await;
+    let result = tokio::task::spawn_blocking(move || run_blocking(tx, shutdown)).await;
 
     match result {
-        Ok(Ok(())) => info!("udev monitor shutting down normally"),
-        Ok(Err(e)) => warn!("udev monitor error: {}", e),
-        Err(e) => warn!("udev monitor task panicked: {}", e),
+        Ok(Ok(())) => {
+            info!("udev monitor shutting down normally");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(join_err) => Err(anyhow::anyhow!("udev monitor task panicked: {join_err}")),
     }
 }
 
-/* Synchronous udev monitor implementation that runs inside a blocking thread. */
-fn run_blocking(tx: mpsc::Sender<DeviceAction>) -> Result<(), String> {
-    /* Enumerate existing devices first */
+/* Synchronous udev monitor implementation that runs inside a blocking
+ * thread.  Returns `Ok(())` when the channel is closed (receiver dropped)
+ * or `Err` on a udev/poll failure. */
+fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
+    /* Enumerate existing devices first. */
     enumerate_existing(&tx)?;
 
-    /* Set up the hotplug monitor */
+    /* Set up the hotplug monitor. */
     let monitor = udev::MonitorBuilder::new()
-        .map_err(|e| format!("MonitorBuilder::new: {}", e))?
+        .context("MonitorBuilder::new")?
         .match_subsystem("hidraw")
-        .map_err(|e| format!("match_subsystem: {}", e))?
+        .context("match_subsystem(hidraw)")?
         .listen()
-        .map_err(|e| format!("listen: {}", e))?;
+        .context("MonitorSocket::listen")?;
 
     info!("udev hotplug monitor listening on hidraw subsystem");
 
-    /* Use poll(2) to wait for events on the udev monitor fd */
+    /* Use poll(2) to wait for events on the udev monitor fd.  The
+     * one-second timeout lets us re-enter the loop and detect a closed
+     * channel without requiring an extra cancellation primitive. */
     let fd = monitor.as_raw_fd();
 
     loop {
         let mut pollfd = [nix::poll::PollFd::new(
+            /* Safety: `fd` was obtained from `monitor.as_raw_fd()` above.
+             * `monitor` is owned by this stack frame and is not moved or
+             * dropped until the function returns, so the raw fd remains
+             * valid for the entire lifetime of the `BorrowedFd`.  The
+             * borrow is consumed by `poll` before the next loop iteration,
+             * ensuring it does not outlive `monitor`. */
             unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) },
             nix::poll::PollFlags::POLLIN,
         )];
 
-        /* Block until the fd is readable (or timeout after 1 second to allow shutdown) */
         match nix::poll::poll(&mut pollfd, nix::poll::PollTimeout::from(1000u16)) {
-            Ok(0) => continue, /* timeout, loop and re-check */
+            Ok(0) => {
+                /* Timeout — check if the daemon is shutting down. */
+                if shutdown.load(Ordering::Relaxed) {
+                    info!("Shutdown flag set, stopping udev monitor");
+                    return Ok(());
+                }
+                continue;
+            }
             Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => return Err(format!("poll: {}", e)),
+            Err(nix::errno::Errno::EINTR) => {
+                /* EINTR can be delivered by the signal that sets the  */
+                /* shutdown flag, so re-check before looping.          */
+                if shutdown.load(Ordering::Relaxed) {
+                    info!("Shutdown flag set (EINTR), stopping udev monitor");
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(e) => return Err(e).context("poll(2) on udev monitor fd"),
         }
 
-        /* Drain all pending events */
+        /* `MonitorSocket::iter()` calls `receive_device()` on each
+         * `next()`.  When poll(2) signals POLLIN, at least one event is
+         * ready; the iterator will yield it and any further events that
+         * the kernel has already queued.  Events arriving between the
+         * last `next()` and the subsequent `poll` are picked up in the
+         * next iteration. */
         for event in monitor.iter() {
-            let event_type = event.event_type();
-
-            match event_type {
+            match event.event_type() {
                 udev::EventType::Add => {
                     if let Some(action) = build_add_action(&event.device()) {
                         info!("Hotplug add: {}", action_sysname(&action));
-                        /* Use blocking_send since we're in a sync context */
-                        let _ = tx.blocking_send(action);
+                        if tx.blocking_send(action).is_err() {
+                            info!("Channel closed, stopping udev monitor");
+                            return Ok(());
+                        }
                     }
                 }
                 udev::EventType::Remove => {
@@ -107,32 +146,40 @@ fn run_blocking(tx: mpsc::Sender<DeviceAction>) -> Result<(), String> {
                         .to_string_lossy()
                         .to_string();
                     info!("Hotplug remove: {}", sysname);
-                    let _ = tx.blocking_send(DeviceAction::Remove { sysname });
+                    if tx.blocking_send(DeviceAction::Remove { sysname }).is_err() {
+                        info!("Channel closed, stopping udev monitor");
+                        return Ok(());
+                    }
                 }
-                _ => {
-                    /* Ignore bind/unbind/change events */
-                }
+                _ => { /* Ignore bind/unbind/change events */ }
             }
         }
     }
 }
 
-/* Enumerate all currently-connected hidraw devices and send `Add` actions. */
-fn enumerate_existing(tx: &mpsc::Sender<DeviceAction>) -> Result<(), String> {
+/* Enumerate all currently-connected hidraw devices and send `Add` actions.
+ * Returns `Ok(())` on success, including the case where the channel is
+ * already closed (the caller will detect that in the poll loop). */
+fn enumerate_existing(tx: &mpsc::Sender<DeviceAction>) -> Result<()> {
     let mut enumerator =
-        udev::Enumerator::new().map_err(|e| format!("udev enumerator: {}", e))?;
+        udev::Enumerator::new().context("udev Enumerator::new")?;
     enumerator
         .match_subsystem("hidraw")
-        .map_err(|e| format!("match_subsystem: {}", e))?;
+        .context("enumerator match_subsystem(hidraw)")?;
 
     let devices = enumerator
         .scan_devices()
-        .map_err(|e| format!("scan_devices: {}", e))?;
+        .context("enumerator scan_devices")?;
 
     for device in devices {
         if let Some(action) = build_add_action(&device) {
             debug!("Enumerated existing device: {}", action_sysname(&action));
-            let _ = tx.blocking_send(action);
+            if tx.blocking_send(action).is_err() {
+                /* Receiver dropped before enumeration finished — the
+                 * daemon is shutting down.  Return Ok(()) and let the
+                 * caller discover the closed channel in the poll loop. */
+                break;
+            }
         }
     }
 
@@ -168,10 +215,10 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
 fn find_hid_parent(device: &udev::Device) -> Option<udev::Device> {
     let mut current = device.parent()?;
     loop {
-        if let Some(subsystem) = current.subsystem()
-            && subsystem == "hid"
-        {
-            return Some(current);
+        if let Some(subsystem) = current.subsystem() {
+            if subsystem == "hid" {
+                return Some(current);
+            }
         }
         current = current.parent()?;
     }

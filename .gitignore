@@ -15,4 +15,3 @@ test/
 *.h
 .claude/skills/linux-driver/SKILL.md
 .claude/rules/rust-linux-devel.instructions.md
-.gitignore

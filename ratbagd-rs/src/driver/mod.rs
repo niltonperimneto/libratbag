@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::device::DeviceInfo;
 
@@ -57,6 +57,20 @@ pub enum DriverError {
 
     #[error("Invalid buffer size: expected at least {expected}, got {actual}")]
     BufferTooSmall { expected: usize, actual: usize },
+
+    #[error(
+        "HID++ 2.0 error {error_name} (0x{error_code:02X}) \
+         for feature 0x{feature_index:02X} fn={function}"
+    )]
+    Hidpp20Error {
+        error_name: &'static str,
+        error_code: u8,
+        feature_index: u8,
+        function: u8,
+    },
+
+    #[error("HID++ 2.0 probe failed: no device responded (tried indices: {indices:02X?})")]
+    Hidpp20ProbeFailure { indices: Vec<u8> },
 }
 
 /* Maximum HID report size.                                        */
@@ -114,6 +128,11 @@ fn hid_set_feature_req(len: usize) -> libc::c_ulong {
 pub struct DeviceIo {
     file: tokio::fs::File,
     path: std::path::PathBuf,
+    /* Reports seen during `request()` that were valid HID++ but did not
+     * match the pending command.  These are unsolicited hardware events
+     * (e.g. profile-switch notifications) that the actor should forward
+     * to `DeviceDriver::handle_event` after each I/O batch. */
+    pending_events: Vec<Vec<u8>>,
 }
 
 impl DeviceIo {
@@ -129,6 +148,7 @@ impl DeviceIo {
         Ok(Self {
             file,
             path: path.to_path_buf(),
+            pending_events: Vec::new(),
         })
     }
 
@@ -223,16 +243,31 @@ impl DeviceIo {
     where
         F: FnMut(&[u8]) -> Option<T>,
     {
+        /* Stack-allocated read buffer — avoids a heap allocation per    */
+        /* attempt.  64 bytes covers all HID++ report sizes (short = 7, */
+        /* long = 20, very-long = 64).  We slice to `report_size` for   */
+        /* the actual read so callers see exactly the length they asked  */
+        /* for.                                                          */
+        const MAX_HID_REPORT: usize = 64;
+        if report_size > MAX_HID_REPORT {
+            return Err(DriverError::BufferTooSmall {
+                expected: MAX_HID_REPORT,
+                actual: report_size,
+            }
+            .into());
+        }
+
         for attempt in 1..=max_attempts {
             self.write_report(report).await?;
 
             let deadline = tokio::time::Instant::now() + READ_TIMEOUT_PER_ATTEMPT;
-            let mut buf = vec![0u8; report_size];
+            let mut backing = [0u8; MAX_HID_REPORT];
+            let buf = &mut backing[..report_size];
 
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    debug!("Read deadline expired on attempt {attempt}");
+                    trace!("Read deadline expired on attempt {attempt}");
                     break;
                 }
 
@@ -241,7 +276,7 @@ impl DeviceIo {
                 /* single read if the device stops sending reports.     */
                 let read_timeout = remaining.min(SINGLE_READ_TIMEOUT);
 
-                match tokio::time::timeout(read_timeout, self.read_report(&mut buf)).await {
+                match tokio::time::timeout(read_timeout, self.read_report(buf)).await {
                     Ok(Ok(n)) => {
                         /* Skip non-HID++ input reports (mouse movement, */
                         /* keyboard, etc.) — they are noise here.        */
@@ -255,6 +290,11 @@ impl DeviceIo {
                         if let Some(result) = matcher(&buf[..n]) {
                             return Ok(result);
                         }
+
+                        /* The report was valid HID++ but did not match our
+                         * pending command — buffer it as an unsolicited
+                         * hardware event for the actor to process later. */
+                        self.pending_events.push(buf[..n].to_vec());
                     }
                     Ok(Err(e)) => {
                         warn!("Read error on attempt {attempt}: {e}");
@@ -263,7 +303,7 @@ impl DeviceIo {
                     Err(_elapsed) => {
                         /* Single-read timeout: no more data coming,   */
                         /* break to retry with a fresh write.          */
-                        debug!("Timeout on attempt {attempt}");
+                        trace!("Timeout on attempt {attempt}");
                         break;
                     }
                 }
@@ -274,6 +314,13 @@ impl DeviceIo {
             attempts: max_attempts,
         }
         .into())
+    }
+
+    /* Drain all unsolicited HID++ events that were buffered during
+     * `request()` calls.  The actor calls this after each I/O batch
+     * and forwards the reports to `DeviceDriver::handle_event`. */
+    pub fn drain_events(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_events)
     }
 }
 
@@ -303,6 +350,21 @@ pub trait DeviceDriver: Send + Sync {
     /* Only dirty fields should be transmitted; the driver should  */
     /* diff the `DeviceInfo` against its internal cached state.    */
     async fn commit(&mut self, io: &mut DeviceIo, info: &DeviceInfo) -> Result<()>;
+
+    /* Handle an unsolicited hardware event (e.g. profile switch,  */
+    /* DPI change triggered by a physical button on the device).   */
+    /*                                                             */
+    /* Returns `true` if the event caused a state change in `info` */
+    /* that the actor should propagate via DBus signals.           */
+    /*                                                             */
+    /* The default implementation ignores all events.              */
+    async fn handle_event(
+        &mut self,
+        _report: &[u8],
+        _info: &mut DeviceInfo,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /* Instantiate the correct driver based on the driver name from the */

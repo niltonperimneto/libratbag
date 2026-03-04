@@ -18,6 +18,7 @@ use super::fallback_owned_value;
 /// Items are looked up by their stored `.index` ID, not by vector position.
 pub struct RatbagResolution {
     device_info: Arc<RwLock<DeviceInfo>>,
+    device_path: String,
     profile_id: u32,
     resolution_id: u32,
 }
@@ -25,11 +26,13 @@ pub struct RatbagResolution {
 impl RatbagResolution {
     pub fn new(
         device_info: Arc<RwLock<DeviceInfo>>,
+        device_path: String,
         profile_id: u32,
         resolution_id: u32,
     ) -> Self {
         Self {
             device_info,
+            device_path,
             profile_id,
             resolution_id,
         }
@@ -125,21 +128,28 @@ impl RatbagResolution {
     }
 
     #[zbus(property)]
-    async fn set_is_disabled(&self, disabled: bool) -> zbus::Result<()> {
-        let mut info = self.device_info.write().await;
-        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Profile {} not found", self.profile_id
-            ))
-        })?;
-        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Resolution {} not found in profile {}",
-                self.resolution_id, self.profile_id
-            ))
-        })?;
-        res.is_disabled = disabled;
-        profile.is_dirty = true;
+    async fn set_is_disabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+        disabled: bool,
+    ) -> zbus::Result<()> {
+        {
+            let mut info = self.device_info.write().await;
+            let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Profile {} not found", self.profile_id
+                ))
+            })?;
+            let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Resolution {} not found in profile {}",
+                    self.resolution_id, self.profile_id
+                ))
+            })?;
+            res.is_disabled = disabled;
+            profile.is_dirty = true;
+        }
+        let _ = self.is_disabled_changed(&emitter).await;
         Ok(())
     }
 
@@ -216,25 +226,50 @@ impl RatbagResolution {
     /// Set this resolution as the active one.
     ///
     /// Deactivates all sibling resolutions in the same profile first.
+    /// Emits `PropertiesChanged` for `IsActive` on every sibling so that
+    /// frontends (Piper) update their UI without a restart.
     /// Returns 0 on success (matching the C daemon's reply signature).
-    async fn set_active(&self) -> zbus::fdo::Result<u32> {
-        let mut info = self.device_info.write().await;
-        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Profile {} not found", self.profile_id
-            ))
-        })?;
-        for res in &mut profile.resolutions {
-            res.is_active = false;
+    async fn set_active(
+        &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
+    ) -> zbus::fdo::Result<u32> {
+        let sibling_count;
+        {
+            let mut info = self.device_info.write().await;
+            let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Profile {} not found", self.profile_id
+                ))
+            })?;
+            sibling_count = profile.resolutions.len();
+            for res in &mut profile.resolutions {
+                res.is_active = false;
+            }
+            let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Resolution {} not found in profile {}",
+                    self.resolution_id, self.profile_id
+                ))
+            })?;
+            res.is_active = true;
+            profile.is_dirty = true;
         }
-        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Resolution {} not found in profile {}",
-                self.resolution_id, self.profile_id
-            ))
-        })?;
-        res.is_active = true;
-        profile.is_dirty = true;
+
+        /* Emit IsActive changed on every sibling resolution.  This mirrors */
+        /* the C daemon's ratbagd_for_each_resolution_signal callback.      */
+        for i in 0..sibling_count as u32 {
+            let path = format!("{}/p{}/r{}", self.device_path, self.profile_id, i);
+            if let Ok(iface_ref) =
+                server.interface::<_, RatbagResolution>(path.as_str()).await
+            {
+                let _ = iface_ref
+                    .get()
+                    .await
+                    .is_active_changed(iface_ref.signal_emitter())
+                    .await;
+            }
+        }
+
         tracing::info!(
             "Resolution {} in profile {} set as active",
             self.resolution_id,
@@ -246,25 +281,50 @@ impl RatbagResolution {
     /// Set this resolution as the default one.
     ///
     /// Clears default on all sibling resolutions in the same profile first.
+    /// Emits `PropertiesChanged` for `IsDefault` on every sibling so that
+    /// frontends (Piper) update their UI without a restart.
     /// Returns 0 on success (matching the C daemon's reply signature).
-    async fn set_default(&self) -> zbus::fdo::Result<u32> {
-        let mut info = self.device_info.write().await;
-        let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Profile {} not found", self.profile_id
-            ))
-        })?;
-        for res in &mut profile.resolutions {
-            res.is_default = false;
+    async fn set_default(
+        &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
+    ) -> zbus::fdo::Result<u32> {
+        let sibling_count;
+        {
+            let mut info = self.device_info.write().await;
+            let profile = info.find_profile_mut(self.profile_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Profile {} not found", self.profile_id
+                ))
+            })?;
+            sibling_count = profile.resolutions.len();
+            for res in &mut profile.resolutions {
+                res.is_default = false;
+            }
+            let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
+                zbus::fdo::Error::Failed(format!(
+                    "Resolution {} not found in profile {}",
+                    self.resolution_id, self.profile_id
+                ))
+            })?;
+            res.is_default = true;
+            profile.is_dirty = true;
         }
-        let res = profile.find_resolution_mut(self.resolution_id).ok_or_else(|| {
-            zbus::fdo::Error::Failed(format!(
-                "Resolution {} not found in profile {}",
-                self.resolution_id, self.profile_id
-            ))
-        })?;
-        res.is_default = true;
-        profile.is_dirty = true;
+
+        /* Emit IsDefault changed on every sibling resolution.  This mirrors */
+        /* the C daemon's ratbagd_for_each_resolution_signal callback.       */
+        for i in 0..sibling_count as u32 {
+            let path = format!("{}/p{}/r{}", self.device_path, self.profile_id, i);
+            if let Ok(iface_ref) =
+                server.interface::<_, RatbagResolution>(path.as_str()).await
+            {
+                let _ = iface_ref
+                    .get()
+                    .await
+                    .is_default_changed(iface_ref.signal_emitter())
+                    .await;
+            }
+        }
+
         tracing::info!(
             "Resolution {} in profile {} set as default",
             self.resolution_id,

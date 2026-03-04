@@ -350,6 +350,28 @@ pub fn build_hidpp20_short_request(
     ]
 }
 
+/* Build a HID++ 2.0 short feature request (7 bytes) with parameters. */
+/*  */
+/* Some firmware commands (e.g. SET_CURRENT_PROFILE, SET_CURRENT_DPI_INDEX) */
+/* must be sent as short reports to match the C driver's behaviour. */
+/* Layout: `[0x10, dev_idx, feature_idx, (fn << 4 | sw_id), p0, p1, p2]` */
+pub fn build_hidpp20_short_request_with_params(
+    device_index: u8,
+    feature_index: u8,
+    function: u8,
+    sw_id: u8,
+    params: &[u8],
+) -> [u8; 7] {
+    let mut buf = [0u8; 7];
+    buf[0] = REPORT_ID_SHORT;
+    buf[1] = device_index;
+    buf[2] = feature_index;
+    buf[3] = (function << 4) | (sw_id & 0x0F);
+    let copy_len = params.len().min(3);
+    buf[4..4 + copy_len].copy_from_slice(&params[..copy_len]);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

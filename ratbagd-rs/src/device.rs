@@ -28,6 +28,36 @@ impl ActionType {
     }
 }
 
+/* Canonical special-action values exposed over the DBus `mapping` property
+ * when `ActionType::Special` is active.  These mirror the C libratbag enum
+ * `ratbag_button_action_special` (starting at 1 << 30 = 0x4000_0000) so
+ * that Piper and other DBus clients recognise every value.  Drivers must
+ * translate between their hardware-specific bytecodes and these constants
+ * when populating or consuming `ButtonInfo::mapping_value`. */
+#[allow(dead_code)]
+pub mod special_action {
+    pub const BASE:                  u32 = 1 << 30;
+    pub const UNKNOWN:               u32 = BASE;
+    pub const DOUBLECLICK:           u32 = BASE + 1;
+    pub const WHEEL_LEFT:            u32 = BASE + 2;
+    pub const WHEEL_RIGHT:           u32 = BASE + 3;
+    pub const WHEEL_UP:              u32 = BASE + 4;
+    pub const WHEEL_DOWN:            u32 = BASE + 5;
+    pub const RATCHET_MODE_SWITCH:   u32 = BASE + 6;
+    pub const RESOLUTION_CYCLE_UP:   u32 = BASE + 7;
+    pub const RESOLUTION_CYCLE_DOWN: u32 = BASE + 8;
+    pub const RESOLUTION_UP:         u32 = BASE + 9;
+    pub const RESOLUTION_DOWN:       u32 = BASE + 10;
+    pub const RESOLUTION_ALTERNATE:  u32 = BASE + 11;
+    pub const RESOLUTION_DEFAULT:    u32 = BASE + 12;
+    pub const PROFILE_CYCLE_UP:      u32 = BASE + 13;
+    pub const PROFILE_CYCLE_DOWN:    u32 = BASE + 14;
+    pub const PROFILE_UP:            u32 = BASE + 15;
+    pub const PROFILE_DOWN:          u32 = BASE + 16;
+    pub const SECOND_MODE:           u32 = BASE + 17;
+    pub const BATTERY_LEVEL:         u32 = BASE + 18;
+}
+
 /* Compact RGB color used for LED effect payloads. */
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RgbColor {
