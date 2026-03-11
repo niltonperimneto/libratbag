@@ -7,8 +7,9 @@ pub mod manager;
 pub mod profile;
 pub mod resolution;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, RwLock};
@@ -26,6 +27,22 @@ use crate::udev_monitor::DeviceAction;
 #[inline]
 pub(crate) fn fallback_owned_value() -> OwnedValue {
     OwnedValue::from(0u32)
+}
+
+/* Drivers that communicate over a vendor-defined HID usage page.  When a
+ * hidraw node does not contain any vendor usage pages (0xFF00+) in its
+ * report descriptor, probing these drivers will always fail — the standard
+ * mouse/keyboard HID interface does not carry the vendor protocol. */
+fn requires_vendor_usage(driver_name: &str) -> bool {
+    matches!(
+        driver_name,
+        "hidpp20" | "hidpp10" | "steelseries" | "roccat"
+            | "roccat-kone-pure" | "roccat-kone-emp"
+            | "sinowealth" | "sinowealth_nubwo"
+            | "gskill" | "openinput" | "etekcity"
+            | "logitech_g300" | "logitech_g600"
+            | "asus" | "marsgaming"
+    )
 }
 
 /// Register a new device and its children (profiles, buttons, etc) onto the DBus bus.
@@ -212,6 +229,13 @@ pub async fn run_server(
     // Track actor handles so we can shut them down on removal.
     let mut actor_handles: HashMap<String, ActorHandle> = HashMap::new();
 
+    /* Track (bustype, vid, pid) tuples that already have a successfully-
+     * probed hidraw node registered.  Multi-interface USB HID devices
+     * expose several `/dev/hidraw*` nodes sharing the same VID:PID;
+     * only one carries the vendor protocol (HID++, etc.).  Once the
+     * correct interface succeeds, skip the remaining duplicates. */
+    let mut probed_devices: HashSet<(BusType, u16, u16)> = HashSet::new();
+
     // Main event loop: process udev device events (and, when dev-hooks is
     // enabled, synthetic test device actions from the DBus manager).
     loop {
@@ -235,6 +259,7 @@ pub async fn run_server(
                 bustype,
                 vid,
                 pid,
+                has_vendor_usage,
             } => {
                 let key = (BusType::from_u16(bustype), vid, pid);
 
@@ -248,6 +273,33 @@ pub async fn run_server(
                         continue;
                     }
                 };
+
+                /* Skip this hidraw node if we already have a working
+                 * driver for the same physical device (same bus/vid/pid).
+                 * Multi-interface USB HID devices expose several hidraw
+                 * nodes; probing the wrong one wastes time. */
+                if probed_devices.contains(&key) {
+                    info!(
+                        "Skipping {} — device {:04x}:{:04x} already probed",
+                        sysname, vid, pid
+                    );
+                    continue;
+                }
+
+                /* Skip hidraw nodes that lack a vendor usage page when the
+                 * driver requires one.  HID++ and similar vendor protocols
+                 * are carried on HID interfaces with vendor-defined usage
+                 * pages (0xFF00+); the standard mouse/keyboard interface
+                 * will never respond to those protocols, and probing it
+                 * wastes up to PROBE_TIMEOUT seconds. */
+                if !has_vendor_usage && requires_vendor_usage(&entry.driver) {
+                    info!(
+                        "Skipping {} — no vendor HID usage page \
+                         (driver {} requires one)",
+                        sysname, entry.driver
+                    );
+                    continue;
+                }
 
                 info!(
                     "Matched device: {} -> {} (driver: {})",
@@ -264,40 +316,73 @@ pub async fn run_server(
                 // Wrap DeviceInfo in Arc<RwLock> so actor and DBus share state.
                 let shared_info = Arc::new(RwLock::new(device_info));
 
+                /* Time budget for opening the device, probing the protocol,
+                 * and loading the full profile state from hardware.  Wired
+                 * Logitech devices can be slow because the HID++ vendor
+                 * interface shares its hidraw node with mouse input reports;
+                 * every read may return noise that must be discarded before
+                 * the protocol response arrives.  120 seconds covers even
+                 * the slowest observed wired devices (e.g. G403 HERO). */
+                const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
                 // Try to create and spawn the hardware driver actor.
                 let actor_handle = match driver::create_driver(&entry.driver) {
                     Some(drv) => {
-                        match actor::spawn_device_actor(
-                            &devnode,
-                            drv,
-                            Arc::clone(&shared_info),
+                        match tokio::time::timeout(
+                            PROBE_TIMEOUT,
+                            actor::spawn_device_actor(
+                                &devnode,
+                                drv,
+                                Arc::clone(&shared_info),
+                            ),
                         )
                         .await
                         {
-                            Ok(handle) => {
+                            Ok(Ok(handle)) => {
                                 info!(
                                     "Driver {} active for {}",
                                     entry.driver, sysname
                                 );
-                                Some(handle)
+                                handle
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 warn!(
                                     "Driver {} probe failed for {}: {e:#}",
                                     entry.driver, sysname
                                 );
-                                None
+                                continue;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "Driver {} probe timed out for {} after {}s — \
+                                     wrong hidraw interface?",
+                                    entry.driver,
+                                    sysname,
+                                    PROBE_TIMEOUT.as_secs()
+                                );
+                                continue;
                             }
                         }
                     }
-                    None => None,
+                    None => {
+                        warn!(
+                            "No driver implementation for '{}' (device {})",
+                            entry.driver, sysname
+                        );
+                        continue;
+                    }
                 };
+
+                /* Probe + profile load succeeded — record this VID:PID so
+                 * we skip any remaining hidraw nodes for the same physical
+                 * device (they would be the wrong USB interface). */
+                probed_devices.insert(key);
 
                 let object_paths = register_device_on_dbus(
                     &conn,
                     &device_path,
                     Arc::clone(&shared_info),
-                    actor_handle.clone(),
+                    Some(actor_handle.clone()),
                 )
                 .await;
 
@@ -315,9 +400,7 @@ pub async fn run_server(
                     .devices_changed(iface_ref.signal_emitter())
                     .await?;
 
-                if let Some(handle) = actor_handle {
-                    actor_handles.insert(sysname.clone(), handle);
-                }
+                actor_handles.insert(sysname.clone(), actor_handle);
                 registered_devices.insert(sysname.clone(), object_paths);
 
                 info!(

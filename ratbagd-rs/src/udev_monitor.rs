@@ -26,6 +26,13 @@ pub enum DeviceAction {
         bustype: u16,
         vid: u16,
         pid: u16,
+        /* `true` when the HID report descriptor contains at least one
+         * vendor-defined usage page (0xFF00..=0xFFFF).  Vendor protocol
+         * interfaces (HID++, SteelSeries, etc.) use these pages, while
+         * standard mouse/keyboard interfaces use Generic Desktop (0x01).
+         * The DBus layer uses this hint to skip probing interfaces that
+         * cannot carry the vendor protocol. */
+        has_vendor_usage: bool,
     },
     Remove {
         sysname: String,
@@ -201,6 +208,8 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
 
     let (bustype, vid, pid) = parse_hid_id(&hid_parent)?;
 
+    let has_vendor_usage = has_vendor_usage_page(&hid_parent);
+
     Some(DeviceAction::Add {
         sysname,
         devnode,
@@ -208,6 +217,7 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         bustype,
         vid,
         pid,
+        has_vendor_usage,
     })
 }
 
@@ -250,4 +260,45 @@ fn action_sysname(action: &DeviceAction) -> &str {
         #[cfg(feature = "dev-hooks")]
         DeviceAction::RemoveTest { sysname } => sysname,
     }
+}
+
+/* Check whether the HID report descriptor contains a vendor-defined usage
+ * page (0xFF00..=0xFFFF).  These pages are used by vendor protocol
+ * interfaces (Logitech HID++, SteelSeries, etc.) and distinguish them
+ * from standard mouse/keyboard HID interfaces.
+ *
+ * The report descriptor is read from sysfs at
+ * `/sys/…/hid-device/report_descriptor`.  A Usage Page item with a 2-byte
+ * value is encoded as `06 lo hi` in the HID descriptor; we check whether
+ * `hi >= 0xFF` which covers the entire vendor-defined range. */
+fn has_vendor_usage_page(hid_device: &udev::Device) -> bool {
+    let syspath = hid_device.syspath();
+    let rd_path = syspath.join("report_descriptor");
+    let data = match std::fs::read(&rd_path) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    /* Scan for Usage Page items with 2-byte values (tag 0x06).
+     * Format: 0x06 <lo_byte> <hi_byte>
+     * Vendor pages have hi_byte >= 0xFF, i.e. page in 0xFF00..=0xFFFF. */
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0x06 && data[i + 2] >= 0xFF {
+            return true;
+        }
+        /* Advance past this item.  Bits 0..1 of the prefix byte encode
+         * the data size: 0→0, 1→1, 2→2, 3→4 bytes.  The prefix byte
+         * itself is 1 byte, so total item size = 1 + data_size. */
+        let size_code = data[i] & 0x03;
+        let data_size = match size_code {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            _ => unreachable!(),
+        };
+        i += 1 + data_size;
+    }
+    false
 }

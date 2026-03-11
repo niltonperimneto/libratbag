@@ -55,4 +55,3 @@ ratbag-command:
 - extend test cases, have a list of test cases that should work on a
   specific device, as per-device separate scripts
 - add default set/get to profile, resolution
-
