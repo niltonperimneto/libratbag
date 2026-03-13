@@ -226,10 +226,8 @@ impl DeviceInfo {
                 buttons: (0..num_buttons as u32)
                     .map(|bi| ButtonInfo {
                         index: bi,
-                        action_type: ActionType::Button,
-                        action_types: vec![0, 1, 2, 3, 4],
                         mapping_value: bi,
-                        macro_entries: Vec::new(),
+                        ..Default::default()
                     })
                     .collect(),
                 leds: (0..num_leds as u32)
@@ -411,13 +409,31 @@ pub struct ResolutionInfo {
 }
 
 /// Button mapping state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ButtonInfo {
     pub index: u32,
     pub action_type: ActionType,
     pub action_types: Vec<u32>,
     pub mapping_value: u32,
     pub macro_entries: Vec<(u32, u32)>,
+}
+
+impl Default for ButtonInfo {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            action_type: ActionType::Button,
+            action_types: vec![
+                ActionType::None as u32,
+                ActionType::Button as u32,
+                ActionType::Special as u32,
+                ActionType::Key as u32,
+                ActionType::Macro as u32,
+            ],
+            mapping_value: 0,
+            macro_entries: Vec::new(),
+        }
+    }
 }
 
 /// LED state.

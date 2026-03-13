@@ -106,20 +106,4 @@ configure_file(
   configuration : config_dbusaccess,
   install_dir : join_paths(dbusdir, 'system.d'))
 
-# AuraRatbag GUI (Tauri v2 + Svelte 5)
-aura_src = join_paths(project_source_root, 'aura-ratbag')
-npm = find_program('npm', required: false)
-if npm.found()
-  custom_target(
-    'aura-ratbag',
-    build_by_default: true,
-    command: [
-      'sh', '-c',
-      '_out="$PWD/$1" && cd "' + aura_src + '" && npm ci --ignore-scripts && npx tauri build 2>&1 && cp src-tauri/target/release/aura-ratbag "$_out" || echo "AuraRatbag build skipped (missing deps?)"',
-      '_', '@OUTPUT@',
-    ],
-    output: 'aura-ratbag',
-    install: true,
-    install_dir: get_option('bindir'),
-  )
-endif
+

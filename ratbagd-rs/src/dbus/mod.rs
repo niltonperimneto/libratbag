@@ -229,12 +229,12 @@ pub async fn run_server(
     // Track actor handles so we can shut them down on removal.
     let mut actor_handles: HashMap<String, ActorHandle> = HashMap::new();
 
-    /* Track (bustype, vid, pid) tuples that already have a successfully-
+    /* Track (bustype, vid, pid, parent_phys) tuples that already have a successfully-
      * probed hidraw node registered.  Multi-interface USB HID devices
-     * expose several `/dev/hidraw*` nodes sharing the same VID:PID;
+     * expose several `/dev/hidraw*` nodes sharing the same physical path;
      * only one carries the vendor protocol (HID++, etc.).  Once the
      * correct interface succeeds, skip the remaining duplicates. */
-    let mut probed_devices: HashSet<(BusType, u16, u16)> = HashSet::new();
+    let mut probed_devices: HashSet<(BusType, u16, u16, String)> = HashSet::new();
 
     // Main event loop: process udev device events (and, when dev-hooks is
     // enabled, synthetic test device actions from the DBus manager).
@@ -259,11 +259,13 @@ pub async fn run_server(
                 bustype,
                 vid,
                 pid,
+                parent_phys,
                 has_vendor_usage,
             } => {
-                let key = (BusType::from_u16(bustype), vid, pid);
+                let phys_key = (BusType::from_u16(bustype), vid, pid, parent_phys.clone());
+                let db_key = (BusType::from_u16(bustype), vid, pid);
 
-                let entry = match device_db.get(&key) {
+                let entry = match device_db.get(&db_key) {
                     Some(e) => e,
                     None => {
                         info!(
@@ -278,7 +280,7 @@ pub async fn run_server(
                  * driver for the same physical device (same bus/vid/pid).
                  * Multi-interface USB HID devices expose several hidraw
                  * nodes; probing the wrong one wastes time. */
-                if probed_devices.contains(&key) {
+                if probed_devices.contains(&phys_key) {
                     info!(
                         "Skipping {} — device {:04x}:{:04x} already probed",
                         sysname, vid, pid
@@ -376,7 +378,7 @@ pub async fn run_server(
                 /* Probe + profile load succeeded — record this VID:PID so
                  * we skip any remaining hidraw nodes for the same physical
                  * device (they would be the wrong USB interface). */
-                probed_devices.insert(key);
+                probed_devices.insert(phys_key);
 
                 let object_paths = register_device_on_dbus(
                     &conn,

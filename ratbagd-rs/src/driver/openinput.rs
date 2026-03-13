@@ -154,7 +154,7 @@ impl DeviceDriver for OpenInputDriver {
             function: OI_FUNCTION_VERSION,
             data: [0u8; OI_REPORT_DATA_MAX_SIZE],
         };
-        let mut response = [0u8; OI_REPORT_SHORT_SIZE];
+        let response = [0u8; OI_REPORT_SHORT_SIZE];
 
         let buf = req.to_short_buf();
         let mut resp_buf = response;

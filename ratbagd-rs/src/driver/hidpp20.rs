@@ -1282,16 +1282,29 @@ impl Hidpp20Driver {
      *   byte 0:    mode (LED_HW_MODE_*)
      *   bytes 1-10: mode-specific effect union */
     fn parse_eeprom_led(led_bytes: &[u8], led_index: usize) -> crate::device::LedInfo {
+        /* Standard LED modes supported by HID++ 2.0 onboard-profile devices.
+         * These match the mode bytes the firmware accepts in the EEPROM LED
+         * struct.  Without this list, Piper sees an empty `Modes` property
+         * and only shows the currently-active mode. */
+        let standard_modes = vec![
+            LedMode::Off,
+            LedMode::Solid,
+            LedMode::Cycle,
+            LedMode::Breathing,
+            LedMode::ColorWave,
+            LedMode::Starlight,
+        ];
+
         let mut led = crate::device::LedInfo {
             index: led_index as u32,
             mode: LedMode::Off,
-            modes: Vec::new(),
+            modes: standard_modes,
             color: Color::default(),
             secondary_color: Color::default(),
             tertiary_color: Color::default(),
-            color_depth: 0,
+            color_depth: 8, /* 8-bit RGB */
             effect_duration: 0,
-            brightness: 0,
+            brightness: 255,
         };
 
         if led_bytes.len() < 11 {

@@ -92,10 +92,13 @@ pub fn build_led_payload(led: &crate::device::LedInfo) -> [u8; LED_PAYLOAD_SIZE]
             payload[0] = LED_HW_MODE_OFF;
         }
         LedMode::Solid => {
+            /* Solid mode has no brightness byte in the protocol.
+             * Apply brightness by scaling RGB values directly. */
+            let br = led.brightness.min(255);
             payload[0] = LED_HW_MODE_FIXED;
-            payload[1] = rgb.r;
-            payload[2] = rgb.g;
-            payload[3] = rgb.b;
+            payload[1] = (u32::from(rgb.r) * br / 255) as u8;
+            payload[2] = (u32::from(rgb.g) * br / 255) as u8;
+            payload[3] = (u32::from(rgb.b) * br / 255) as u8;
         }
         LedMode::Cycle => {
             payload[0] = LED_HW_MODE_CYCLE;
@@ -110,14 +113,16 @@ pub fn build_led_payload(led: &crate::device::LedInfo) -> [u8; LED_PAYLOAD_SIZE]
             payload[8] = brightness;
         }
         LedMode::Starlight => {
+            /* Starlight has no brightness byte — scale RGB. */
+            let br = led.brightness.min(255);
             let star = led.secondary_color.to_rgb();
             payload[0] = LED_HW_MODE_STARLIGHT;
-            payload[1] = rgb.r;
-            payload[2] = rgb.g;
-            payload[3] = rgb.b;
-            payload[4] = star.r;
-            payload[5] = star.g;
-            payload[6] = star.b;
+            payload[1] = (u32::from(rgb.r) * br / 255) as u8;
+            payload[2] = (u32::from(rgb.g) * br / 255) as u8;
+            payload[3] = (u32::from(rgb.b) * br / 255) as u8;
+            payload[4] = (u32::from(star.r) * br / 255) as u8;
+            payload[5] = (u32::from(star.g) * br / 255) as u8;
+            payload[6] = (u32::from(star.b) * br / 255) as u8;
         }
         LedMode::Breathing => {
             payload[0] = LED_HW_MODE_BREATHING;
@@ -130,20 +135,20 @@ pub fn build_led_payload(led: &crate::device::LedInfo) -> [u8; LED_PAYLOAD_SIZE]
             payload[7] = brightness;
         }
         LedMode::TriColor => {
-            /* TriColor uses the full 9-byte RGB for 3 zones: left, center, right. */
-            /* Primary = left, secondary = center, tertiary = right. */
+            /* TriColor has no brightness byte — scale all 3 zones. */
+            let br = led.brightness.min(255);
             let center = led.secondary_color.to_rgb();
             let right = led.tertiary_color.to_rgb();
             payload[0] = LED_HW_MODE_FIXED;
-            payload[1] = rgb.r;
-            payload[2] = rgb.g;
-            payload[3] = rgb.b;
-            payload[4] = center.r;
-            payload[5] = center.g;
-            payload[6] = center.b;
-            payload[7] = right.r;
-            payload[8] = right.g;
-            payload[9] = right.b;
+            payload[1] = (u32::from(rgb.r) * br / 255) as u8;
+            payload[2] = (u32::from(rgb.g) * br / 255) as u8;
+            payload[3] = (u32::from(rgb.b) * br / 255) as u8;
+            payload[4] = (u32::from(center.r) * br / 255) as u8;
+            payload[5] = (u32::from(center.g) * br / 255) as u8;
+            payload[6] = (u32::from(center.b) * br / 255) as u8;
+            payload[7] = (u32::from(right.r) * br / 255) as u8;
+            payload[8] = (u32::from(right.g) * br / 255) as u8;
+            payload[9] = (u32::from(right.b) * br / 255) as u8;
         }
     }
 

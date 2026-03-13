@@ -26,6 +26,9 @@ pub enum DeviceAction {
         bustype: u16,
         vid: u16,
         pid: u16,
+        /* Physical parent connecting path (e.g. `usb-0000:02:00.0-5`).
+         * Used to deduplicate multiple hidraw nodes from the same physical mouse. */
+        parent_phys: String,
         /* `true` when the HID report descriptor contains at least one
          * vendor-defined usage page (0xFF00..=0xFFFF).  Vendor protocol
          * interfaces (HID++, SteelSeries, etc.) use these pages, while
@@ -59,6 +62,9 @@ pub enum DeviceAction {
  * or an `Err` if a udev syscall fails.  The caller in `main.rs` joins
  * this future inside `tokio::select!` so that either outcome surfaces. */
 pub async fn run(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
+// ...
+// The rest is identically unmodified until build_add_action:
+
     info!("udev monitor started, watching for hidraw devices");
 
     let result = tokio::task::spawn_blocking(move || run_blocking(tx, shutdown)).await;
@@ -206,6 +212,19 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         .map(|v| v.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
+    /* Extract the physical USB port (e.g. `usb-0000:02:00.0-5/input0` -> `usb-0000:02:00.0-5`) */
+    let mut parent_phys = hid_parent
+        .property_value("HID_PHYS")
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if let Some(slash_idx) = parent_phys.rfind('/') {
+        parent_phys.truncate(slash_idx);
+    }
+    /* Fallback to something if HID_PHYS is entirely missing */
+    if parent_phys.is_empty() {
+        parent_phys = sysname.clone();
+    }
+
     let (bustype, vid, pid) = parse_hid_id(&hid_parent)?;
 
     let has_vendor_usage = has_vendor_usage_page(&hid_parent);
@@ -217,6 +236,7 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         bustype,
         vid,
         pid,
+        parent_phys,
         has_vendor_usage,
     })
 }
