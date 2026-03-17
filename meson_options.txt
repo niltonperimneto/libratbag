@@ -1,19 +1,6 @@
-option('systemd-unit-dir',
-	type : 'string',
-	value : '',
-	description : 'systemd unit directory [default=$libdir/systemd/system]')
+option('systemd', type: 'boolean', value: true, description: 'Enable systemd unit files')
 
-option('dbus-root-dir',
-	type : 'string',
-	value : '',
-	description : 'dbus service directory [default=$datadir/dbus-1]')
-
-option('dbus-group',
-	type: 'string',
-	value : '',
-	description : 'The UNIX group that is granted access to the ratbagd D-Bus service. By default all users may access it.')
-
-option('systemd',
-	type : 'boolean',
-	value : true,
-	description : 'Build systemd unit files')
+option('systemd-unit-dir', type: 'string', value: '', description: 'Systemd unit files directory')
+option('dbus-root-dir', type: 'string', value: '', description: 'DBus root directory')
+option('dbus-group', type: 'string', value: 'wheel', description: 'Group for DBus access control')
+option('build-gui', type: 'boolean', value: true, description: 'Build the Twister Svelte/Tauri GUI dashboard (requires npm)')

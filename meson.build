@@ -1,5 +1,5 @@
 project('libratbag', 'rust',
-  version : '1.0.0',
+  version : '1.3.0',
   license : ['GPL-3.0-or-later', 'MIT'],
   meson_version : '>= 0.50.0')
 
@@ -16,8 +16,15 @@ endif
 cargo = find_program('cargo', required: true)
 cargo_path = cargo.full_path()
 
+build_gui = get_option('build-gui')
+if build_gui
+  npm = find_program('npm', required: true)
+  npm_path = npm.full_path()
+endif
+
 ratbagd_src = join_paths(project_source_root, 'ratbagd-rs')
 ratbagctl_src = join_paths(project_source_root, 'ratbagctl-rs')
+twister_src = join_paths(project_source_root, 'twister')
 
 custom_target(
   'ratbagd',
@@ -29,7 +36,7 @@ custom_target(
   ],
   output: 'ratbagd',
   install: true,
-  install_dir: get_option('sbindir'),
+  install_dir: get_option('bindir'),
 )
 
 custom_target(
@@ -45,6 +52,22 @@ custom_target(
   install_dir: get_option('bindir'),
 )
 
+if build_gui
+  # We use a single custom target to chain `npm install` and `npm run tauri build`
+  custom_target(
+    'twister',
+    build_by_default: true,
+    command: [
+      'sh', '-c',
+      '_out="$PWD/$1" && cd "' + twister_src + '" && "' + npm_path + '" install && npx @tauri-apps/cli build && cp src-tauri/target/release/twister "$_out"',
+      '_', '@OUTPUT@',
+    ],
+    output: 'twister',
+    install: true,
+    install_dir: get_option('bindir'),
+  )
+endif
+
 install_man('ratbagd/ratbagd.8')
 
 # Install device database (.device files)
@@ -54,7 +77,7 @@ install_subdir('data/devices',
   install_dir : join_paths(get_option('datadir'), 'libratbag'))
 
 config_sbindir = configuration_data()
-config_sbindir.set('sbindir', join_paths(get_option('prefix'), get_option('sbindir')))
+config_sbindir.set('sbindir', join_paths(get_option('prefix'), get_option('bindir')))
 
 # systemd unit file (DBus-activated)
 if enable_systemd

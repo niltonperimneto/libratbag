@@ -26,9 +26,7 @@ Kone EMP variants), Sinowealth (including Nubwo), and Steelseries.
 See [the device files](https://github.com/libratbag/libratbag/tree/master/data/devices)
 for a complete list of supported devices.
 
-Users interact through a GUI like
-[Piper](https://github.com/libratbag/piper/) or the `ratbagctl` command-line
-tool (see below).
+Users interact through the official **Twister** GUI dashboard (included as a submodule) or the `ratbagctl` command-line tool (see below).
 
 What Changed in the Rust Rewrite
 ---------------------------------
@@ -55,6 +53,7 @@ The core `ratbagd` daemon has been rewritten from C to Rust. Key changes:
 - **Zero configuration drift** — the Rust binary is built as `ratbagd` and
   installed to `sbindir`; the existing systemd unit, DBus activation file,
   and DBus policy are reused unchanged.
+- **Integrated GUI** — the official `twister` frontend (Svelte 5 + Tauri) is now directly integrated into the libratbag source tree as a submodule and built seamlessly via Meson.
 - **License change** — the Rust daemon (`ratbagd-rs/`) is licensed under
   **GPLv3**. Supporting assets (service templates, device data, docs) remain
   under MIT/Expat (see the License section below).
@@ -81,10 +80,11 @@ Build Requirements
   Install via [rustup](https://rustup.rs/) or your distribution's package
   manager.
 - **Meson** (>= 0.50) and **Ninja**.
-- **System libraries**: `libudev` (required for runtime udev monitoring) and
+- **Node.js & npm** — required to build the `twister` Svelte/Tauri GUI. (You can disable the GUI build with `-Dbuild-gui=false` if npm isn't available).
+- **System libraries**: `libudev` (required for runtime udev monitoring), `webkit2gtk-4.1` (required for Tauri GUI rendering), and
   `systemd` (only for installing the unit file; optional if you package the
   service files yourself).
-- **pkg-config** — used by Meson to locate `libudev` and `systemd`.
+- **pkg-config** — used by Meson to locate `libudev`, `webkit2gtk`, and `systemd`.
 
 The Rust daemon itself depends on `tokio`, `zbus`, `nix`, `udev`, `serde`,
 `tracing`, and other crates — Cargo resolves these automatically. The CLI
@@ -100,7 +100,7 @@ turn uses Ninja to invoke the compilers. Meson drives the Rust build
 automatically via Cargo. Run the following commands to clone libratbag and
 build everything:
 
-    git clone https://github.com/libratbag/libratbag.git
+    git clone --recurse-submodules https://github.com/niltonperimneto/libratbag.git
     cd libratbag
     meson setup builddir --prefix=/usr
     meson compile -C builddir
@@ -132,6 +132,7 @@ Notable options:
 | `-Dsystemd-unit-dir=PATH` | auto | Override the systemd unit directory |
 | `-Ddbus-root-dir=PATH` | auto | Override the DBus configuration directory |
 | `-Ddbus-group=GROUP` | (everyone) | Restrict DBus access to a UNIX group |
+| `-Dbuild-gui=true` | `true` | Build the Twister GUI (requires npm) |
 
 ### Building with dev-hooks (for testing)
 
@@ -290,9 +291,9 @@ Architecture
 
 ### High-level data flow
 
-    +-------+    +------+    +-------------------+
-    | Piper | -> | DBus | -> | ratbagd-rs (Rust) | -> /dev/hidraw*
-    +-------+    +------+    +-------------------+
+    +-----------------+    +------+    +-------------------+
+    | Twister (Tauri) | -> | DBus | -> | ratbagd-rs (Rust) | -> /dev/hidraw*
+    +-----------------+    +------+    +-------------------+
                                     |
                              +------+------+
                              | Device Actor | (one per mouse, owns DeviceIo)
