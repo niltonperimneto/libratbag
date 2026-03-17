@@ -73,6 +73,7 @@ pub struct DriverConfig {
     pub leds: Option<u32>,
     pub dpis: Option<u32>,
     pub dpi_range: Option<DpiRange>,
+    pub dpi_list: Vec<u32>,
     pub wireless: bool,
     pub device_version: Option<u32>,
     pub macro_length: Option<u32>,
@@ -175,6 +176,7 @@ fn parse_device_file(path: &Path) -> Result<DeviceEntry, String> {
         || ini.get(&driver_section, "leds").is_some()
         || ini.get(&driver_section, "dpis").is_some()
         || ini.get(&driver_section, "dpirange").is_some()
+        || ini.get(&driver_section, "dpilist").is_some()
         || ini.get(&driver_section, "deviceversion").is_some()
         || ini.get(&driver_section, "macrolength").is_some()
         || ini.get(&driver_section, "quirk").is_some()
@@ -235,6 +237,15 @@ fn parse_driver_config(ini: &Ini, section: &str) -> DriverConfig {
         .get(section, "dpirange")
         .and_then(|s| parse_dpi_range(&s));
 
+    let dpi_list: Vec<u32> = ini
+        .get(section, "dpilist")
+        .map(|s| {
+            s.split(';')
+                .filter_map(|v| v.trim().parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
     /* Quirks: handle both Logitech's singular `Quirk=` and Asus's plural `Quirks=`. */
     let quirks = ini
         .get(section, "quirks")
@@ -274,6 +285,7 @@ fn parse_driver_config(ini: &Ini, section: &str) -> DriverConfig {
             .get(section, "macrolength")
             .and_then(|v| v.parse().ok()),
         dpi_range,
+        dpi_list,
         quirks,
         button_mapping,
         button_mapping_secondary,
@@ -421,6 +433,25 @@ mod tests {
     fn test_parse_hex_array_trailing_semicolon() {
         let result = parse_hex_array("0a;0b;");
         assert_eq!(result, vec![0x0a, 0x0b]);
+    }
+
+    #[test]
+    fn test_parse_dpi_list_values() {
+        /* Mirrors the DpiList parsing logic from parse_driver_config. */
+        let s = "400;800;1600;3200";
+        let result: Vec<u32> = s.split(';')
+            .filter_map(|v| v.trim().parse::<u32>().ok())
+            .collect();
+        assert_eq!(result, vec![400, 800, 1600, 3200]);
+    }
+
+    #[test]
+    fn test_parse_dpi_list_with_spaces() {
+        let s = "250; 500; 1000; 1250; 1500; 1750; 2000; 4000";
+        let result: Vec<u32> = s.split(';')
+            .filter_map(|v| v.trim().parse::<u32>().ok())
+            .collect();
+        assert_eq!(result, vec![250, 500, 1000, 1250, 1500, 1750, 2000, 4000]);
     }
 
     #[test]

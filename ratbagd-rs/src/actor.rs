@@ -5,6 +5,7 @@
  * DBus interface objects communicate with this actor through an
  * `mpsc` channel, ensuring that all hardware I/O is serialized. */
 
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,14 +14,106 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::device::DeviceInfo;
-use crate::driver::{DeviceDriver, DeviceIo};
+use crate::driver::{DeviceDriver, DeviceIo, DriverError};
+
+/* Structured error type for commit failures, preserving the failure
+ * category across the actor channel boundary so that DBus clients
+ * and GUI frontends can display context-appropriate recovery
+ * instructions rather than opaque error strings. */
+#[derive(Debug)]
+pub enum CommitError {
+    /* The device actor task has exited (device removed or crashed). */
+    ActorGone,
+
+    /* A hardware I/O failure occurred (read/write on hidraw). */
+    Io { detail: String },
+
+    /* The device did not respond within the retry budget. */
+    Timeout { attempts: u8 },
+
+    /* Sector CRC verification failed after writing. */
+    ChecksumMismatch { computed: u16, received: u16 },
+
+    /* The device returned a protocol-level error. */
+    ProtocolError { detail: String },
+
+    /* Any other driver failure not covered above. */
+    Other { detail: String },
+}
+
+impl fmt::Display for CommitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActorGone => write!(f, "Device actor is no longer running"),
+            Self::Io { detail } => write!(f, "I/O failure: {detail}"),
+            Self::Timeout { attempts } => {
+                write!(f, "Hardware timed out after {attempts} attempt(s)")
+            }
+            Self::ChecksumMismatch { computed, received } => write!(
+                f,
+                "Checksum mismatch: computed {computed:#06x}, received {received:#06x}"
+            ),
+            Self::ProtocolError { detail } => write!(f, "Protocol error: {detail}"),
+            Self::Other { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl CommitError {
+    /* Convert an `anyhow::Error` (which may wrap a `DriverError`) into the
+     * appropriate `CommitError` variant, preserving structured information
+     * when the root cause is a known driver error. */
+    fn from_anyhow(err: &anyhow::Error) -> Self {
+        if let Some(de) = err.downcast_ref::<DriverError>() {
+            match de {
+                DriverError::Io { device, source } => Self::Io {
+                    detail: format!("{device}: {source}"),
+                },
+                DriverError::IoctlFailed(e) => Self::Io {
+                    detail: format!("ioctl: {e}"),
+                },
+                DriverError::Timeout { attempts } => Self::Timeout {
+                    attempts: *attempts,
+                },
+                DriverError::ChecksumMismatch { computed, received } => Self::ChecksumMismatch {
+                    computed: *computed,
+                    received: *received,
+                },
+                DriverError::ProtocolError { sub_id, error } => Self::ProtocolError {
+                    detail: format!("sub_id={sub_id:#04x}, error={error:#04x}"),
+                },
+                DriverError::Hidpp20Error {
+                    error_name,
+                    error_code,
+                    feature_index,
+                    function,
+                } => Self::ProtocolError {
+                    detail: format!(
+                        "HID++ 2.0 {error_name} (0x{error_code:02X}) \
+                         feature 0x{feature_index:02X} fn={function}"
+                    ),
+                },
+                DriverError::BufferTooSmall { expected, actual } => Self::Other {
+                    detail: format!("buffer too small: expected {expected}, got {actual}"),
+                },
+                DriverError::Hidpp20ProbeFailure { indices } => Self::Other {
+                    detail: format!("probe failed (indices: {indices:02X?})"),
+                },
+            }
+        } else {
+            Self::Other {
+                detail: format!("{err:#}"),
+            }
+        }
+    }
+}
 
 /* Commands that DBus interface objects can send to the device actor. */
 #[derive(Debug)]
 pub enum ActorMessage {
     /* Commit all pending changes to hardware and report success/failure. */
     Commit {
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), CommitError>>,
     },
     /* Gracefully shut down the actor (e.g., on device removal). */
     Shutdown,
@@ -39,18 +132,16 @@ impl ActorHandle {
     }
 
     /* Request the actor to commit pending changes to hardware.
-     * Returns `Ok(())` on success, or an error string on failure. */
-    pub async fn commit(&self) -> Result<(), String> {
+     * Returns `Ok(())` on success, or a structured `CommitError` on failure. */
+    pub async fn commit(&self) -> Result<(), CommitError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
             .send(ActorMessage::Commit { reply: reply_tx })
             .await
-            .map_err(|_| "Device actor is no longer running".to_string())?;
+            .map_err(|_| CommitError::ActorGone)?;
 
-        reply_rx
-            .await
-            .map_err(|_| "Device actor dropped the reply channel".to_string())?
+        reply_rx.await.map_err(|_| CommitError::ActorGone)?
     }
 }
 
@@ -115,7 +206,7 @@ impl DeviceActor {
                         }
                     }
 
-                    let response = result.map_err(|e| format!("{e:#}"));
+                    let response = result.map_err(|e| CommitError::from_anyhow(&e));
                     let _ = reply.send(response);
                 }
                 ActorMessage::Shutdown => {

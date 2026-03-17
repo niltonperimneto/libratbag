@@ -55,6 +55,17 @@ pub enum DeviceAction {
     },
 }
 
+impl DeviceAction {
+    /* Extract sysname from any variant for logging. */
+    fn sysname(&self) -> &str {
+        match self {
+            Self::Add { sysname, .. } | Self::Remove { sysname } => sysname,
+            #[cfg(feature = "dev-hooks")]
+            Self::InjectTest { sysname, .. } | Self::RemoveTest { sysname } => sysname,
+        }
+    }
+}
+
 /* Run the udev monitor: enumerate existing hidraw devices, then watch
  * for hotplug events indefinitely.
  *
@@ -62,9 +73,6 @@ pub enum DeviceAction {
  * or an `Err` if a udev syscall fails.  The caller in `main.rs` joins
  * this future inside `tokio::select!` so that either outcome surfaces. */
 pub async fn run(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
-// ...
-// The rest is identically unmodified until build_add_action:
-
     info!("udev monitor started, watching for hidraw devices");
 
     let result = tokio::task::spawn_blocking(move || run_blocking(tx, shutdown)).await;
@@ -82,6 +90,7 @@ pub async fn run(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> R
 /* Synchronous udev monitor implementation that runs inside a blocking
  * thread.  Returns `Ok(())` when the channel is closed (receiver dropped)
  * or `Err` on a udev/poll failure. */
+#[allow(clippy::needless_pass_by_value)] /* Owned values required: moved into spawn_blocking closure. */
 fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
     /* Enumerate existing devices first. */
     enumerate_existing(&tx)?;
@@ -101,21 +110,27 @@ fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Re
      * channel without requiring an extra cancellation primitive. */
     let fd = monitor.as_raw_fd();
 
+    /* Safety: `fd` was obtained from `monitor.as_raw_fd()` above.
+     * `monitor` is owned by this stack frame and is not moved or
+     * dropped until the function returns, so the raw fd remains
+     * valid for the entire lifetime of the `BorrowedFd`. */
+    let borrowed_fd = unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) };
+
+    /* Helper: send a DeviceAction, returning false if the channel is closed. */
+    let send = |action: DeviceAction| -> bool {
+        tx.blocking_send(action).is_ok()
+    };
+
     loop {
         let mut pollfd = [nix::poll::PollFd::new(
-            /* Safety: `fd` was obtained from `monitor.as_raw_fd()` above.
-             * `monitor` is owned by this stack frame and is not moved or
-             * dropped until the function returns, so the raw fd remains
-             * valid for the entire lifetime of the `BorrowedFd`.  The
-             * borrow is consumed by `poll` before the next loop iteration,
-             * ensuring it does not outlive `monitor`. */
-            unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) },
+            borrowed_fd,
             nix::poll::PollFlags::POLLIN,
         )];
 
         match nix::poll::poll(&mut pollfd, nix::poll::PollTimeout::from(1000u16)) {
-            Ok(0) => {
-                /* Timeout — check if the daemon is shutting down. */
+            /* Timeout or EINTR — check the shutdown flag before looping.
+             * EINTR can be delivered by the signal that sets the flag. */
+            Ok(0) | Err(nix::errno::Errno::EINTR) => {
                 if shutdown.load(Ordering::Relaxed) {
                     info!("Shutdown flag set, stopping udev monitor");
                     return Ok(());
@@ -123,15 +138,6 @@ fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Re
                 continue;
             }
             Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => {
-                /* EINTR can be delivered by the signal that sets the  */
-                /* shutdown flag, so re-check before looping.          */
-                if shutdown.load(Ordering::Relaxed) {
-                    info!("Shutdown flag set (EINTR), stopping udev monitor");
-                    return Ok(());
-                }
-                continue;
-            }
             Err(e) => return Err(e).context("poll(2) on udev monitor fd"),
         }
 
@@ -145,21 +151,17 @@ fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Re
             match event.event_type() {
                 udev::EventType::Add => {
                     if let Some(action) = build_add_action(&event.device()) {
-                        info!("Hotplug add: {}", action_sysname(&action));
-                        if tx.blocking_send(action).is_err() {
+                        info!("Hotplug add: {}", action.sysname());
+                        if !send(action) {
                             info!("Channel closed, stopping udev monitor");
                             return Ok(());
                         }
                     }
                 }
                 udev::EventType::Remove => {
-                    let sysname = event
-                        .device()
-                        .sysname()
-                        .to_string_lossy()
-                        .to_string();
-                    info!("Hotplug remove: {}", sysname);
-                    if tx.blocking_send(DeviceAction::Remove { sysname }).is_err() {
+                    let sysname = event.device().sysname().to_string_lossy().into_owned();
+                    info!("Hotplug remove: {sysname}");
+                    if !send(DeviceAction::Remove { sysname }) {
                         info!("Channel closed, stopping udev monitor");
                         return Ok(());
                     }
@@ -186,7 +188,7 @@ fn enumerate_existing(tx: &mpsc::Sender<DeviceAction>) -> Result<()> {
 
     for device in devices {
         if let Some(action) = build_add_action(&device) {
-            debug!("Enumerated existing device: {}", action_sysname(&action));
+            debug!("Enumerated existing device: {}", action.sysname());
             if tx.blocking_send(action).is_err() {
                 /* Receiver dropped before enumeration finished — the
                  * daemon is shutting down.  Return Ok(()) and let the
@@ -201,32 +203,30 @@ fn enumerate_existing(tx: &mpsc::Sender<DeviceAction>) -> Result<()> {
 
 /* Build a `DeviceAction::Add` from a udev device, extracting HID properties. */
 fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
-    let sysname = device.sysname().to_string_lossy().to_string();
+    let sysname = device.sysname().to_string_lossy().into_owned();
     let devnode = device.devnode()?.to_path_buf();
 
-    /* Walk up to the parent HID device to find HID_ID and HID_NAME */
+    /* Walk up to the parent HID device to find HID_ID and HID_NAME. */
     let hid_parent = find_hid_parent(device)?;
 
-    let name = hid_parent
-        .property_value("HID_NAME")
-        .map(|v| v.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
+    let name = match hid_parent.property_value("HID_NAME") {
+        Some(v) => v.to_string_lossy().into_owned(),
+        None => "Unknown".to_owned(),
+    };
 
-    /* Extract the physical USB port (e.g. `usb-0000:02:00.0-5/input0` -> `usb-0000:02:00.0-5`) */
-    let mut parent_phys = hid_parent
+    /* Extract the physical USB port path, truncating at the final `/`
+     * (e.g. `usb-0000:02:00.0-5/input0` → `usb-0000:02:00.0-5`).
+     * Falls back to sysname if HID_PHYS is absent or empty. */
+    let parent_phys = hid_parent
         .property_value("HID_PHYS")
-        .map(|v| v.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if let Some(slash_idx) = parent_phys.rfind('/') {
-        parent_phys.truncate(slash_idx);
-    }
-    /* Fallback to something if HID_PHYS is entirely missing */
-    if parent_phys.is_empty() {
-        parent_phys = sysname.clone();
-    }
+        .map(|v| v.to_string_lossy())
+        .and_then(|phys| {
+            let s = phys.rsplit_once('/').map_or(&*phys, |(prefix, _)| prefix);
+            if s.is_empty() { None } else { Some(s.to_owned()) }
+        })
+        .unwrap_or_else(|| sysname.clone());
 
     let (bustype, vid, pid) = parse_hid_id(&hid_parent)?;
-
     let has_vendor_usage = has_vendor_usage_page(&hid_parent);
 
     Some(DeviceAction::Add {
@@ -241,45 +241,26 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
     })
 }
 
-/* Walk up the device tree to find the parent with subsystem "hid". */
+/* Walk up the device tree to find the parent with subsystem "hid",
+ * delegating to libudev's native `udev_device_get_parent_with_subsystem_devtype`. */
 fn find_hid_parent(device: &udev::Device) -> Option<udev::Device> {
-    let mut current = device.parent()?;
-    loop {
-        if let Some(subsystem) = current.subsystem() {
-            if subsystem == "hid" {
-                return Some(current);
-            }
-        }
-        current = current.parent()?;
-    }
+    device.parent_with_subsystem("hid").ok().flatten()
 }
 
-/* Parse the `HID_ID` property (format: `BBBB:VVVV:PPPP`) into (bustype, vid, pid). */
+/* Parse the `HID_ID` property (format: `BBBB:VVVV:PPPP`) into (bustype, vid, pid).
+ * Uses zero-allocation iterator destructuring instead of collecting into a Vec. */
 fn parse_hid_id(device: &udev::Device) -> Option<(u16, u16, u16)> {
     let hid_id = device.property_value("HID_ID")?;
     let s = hid_id.to_string_lossy();
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
+    let mut parts = s.splitn(4, ':');
+    let bustype = u16::from_str_radix(parts.next()?, 16).ok()?;
+    let vid = u16::from_str_radix(parts.next()?, 16).ok()?;
+    let pid = u16::from_str_radix(parts.next()?, 16).ok()?;
+    /* Reject malformed IDs with more than three fields. */
+    if parts.next().is_some() {
         return None;
     }
-
-    let bustype = u16::from_str_radix(parts[0], 16).ok()?;
-    let vid = u16::from_str_radix(parts[1], 16).ok()?;
-    let pid = u16::from_str_radix(parts[2], 16).ok()?;
-
     Some((bustype, vid, pid))
-}
-
-/* Helper to extract sysname from a DeviceAction for logging. */
-fn action_sysname(action: &DeviceAction) -> &str {
-    match action {
-        DeviceAction::Add { sysname, .. } => sysname,
-        DeviceAction::Remove { sysname } => sysname,
-        #[cfg(feature = "dev-hooks")]
-        DeviceAction::InjectTest { sysname, .. } => sysname,
-        #[cfg(feature = "dev-hooks")]
-        DeviceAction::RemoveTest { sysname } => sysname,
-    }
 }
 
 /* Check whether the HID report descriptor contains a vendor-defined usage
@@ -290,34 +271,47 @@ fn action_sysname(action: &DeviceAction) -> &str {
  * The report descriptor is read from sysfs at
  * `/sys/…/hid-device/report_descriptor`.  A Usage Page item with a 2-byte
  * value is encoded as `06 lo hi` in the HID descriptor; we check whether
- * `hi >= 0xFF` which covers the entire vendor-defined range. */
+ * `hi >= 0xFF` which covers the entire vendor-defined range.
+ *
+ * The parser handles both short items (HID spec 6.2.2.2) and long items
+ * (6.2.2.3, prefix 0xFE) to maintain correct cursor alignment even if
+ * a descriptor contains reserved long-item encodings. */
 fn has_vendor_usage_page(hid_device: &udev::Device) -> bool {
+    /* Short-item data sizes indexed by the 2-bit size code (prefix & 0x03).
+     * Code 3 encodes 4 bytes, not 3 (HID spec 6.2.2.2). */
+    const SHORT_ITEM_DATA_SIZE: [usize; 4] = [0, 1, 2, 4];
+
     let syspath = hid_device.syspath();
     let rd_path = syspath.join("report_descriptor");
-    let data = match std::fs::read(&rd_path) {
-        Ok(d) => d,
-        Err(_) => return false,
+    let Ok(data) = std::fs::read(&rd_path) else {
+        return false;
     };
 
-    /* Scan for Usage Page items with 2-byte values (tag 0x06).
-     * Format: 0x06 <lo_byte> <hi_byte>
-     * Vendor pages have hi_byte >= 0xFF, i.e. page in 0xFF00..=0xFFFF. */
     let mut i = 0;
-    while i + 2 < data.len() {
-        if data[i] == 0x06 && data[i + 2] >= 0xFF {
+    while i < data.len() {
+        let prefix = data[i];
+
+        /* Long items (HID spec 6.2.2.3): prefix byte is 0xFE.
+         * Format: 0xFE <data_size:u8> <long_item_tag:u8> <data…>
+         * Total length = 3 + data_size.  No standard usage pages
+         * appear in long items, so we simply skip them. */
+        if prefix == 0xFE {
+            if i + 1 >= data.len() {
+                break;
+            }
+            let long_data_size = data[i + 1] as usize;
+            i += 3 + long_data_size;
+            continue;
+        }
+
+        /* Short item: check for 2-byte Usage Page (tag 0x06)
+         * with vendor-defined high byte (>= 0xFF). */
+        if prefix == 0x06 && i + 2 < data.len() && data[i + 2] == 0xFF {
             return true;
         }
-        /* Advance past this item.  Bits 0..1 of the prefix byte encode
-         * the data size: 0→0, 1→1, 2→2, 3→4 bytes.  The prefix byte
-         * itself is 1 byte, so total item size = 1 + data_size. */
-        let size_code = data[i] & 0x03;
-        let data_size = match size_code {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3 => 4,
-            _ => unreachable!(),
-        };
+
+        /* Advance past this short item. */
+        let data_size = SHORT_ITEM_DATA_SIZE[(prefix & 0x03) as usize];
         i += 1 + data_size;
     }
     false

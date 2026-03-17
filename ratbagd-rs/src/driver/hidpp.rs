@@ -155,6 +155,103 @@ pub fn build_led_payload(led: &crate::device::LedInfo) -> [u8; LED_PAYLOAD_SIZE]
     payload
 }
 
+/* -------------------------------------------------------------------------- */
+/* LED payload deserialization (shared by live 0x8070 and EEPROM parsing)     */
+/* -------------------------------------------------------------------------- */
+
+/* Decoded LED state from an 11-byte HID++ 2.0 LED payload.
+ * Used by both the live feature read (0x8070 getZoneEffect) and EEPROM
+ * profile sector parsing, which store identical byte layouts. */
+#[derive(Debug, Clone)]
+pub struct DecodedLedState {
+    pub mode: crate::device::LedMode,
+    pub color: crate::device::Color,
+    pub secondary_color: crate::device::Color,
+    pub effect_duration: u32,
+    pub brightness: u32,
+}
+
+/* Parse an 11-byte LED payload into a `DecodedLedState`.
+ *
+ * The byte layout matches the C `struct hidpp20_internal_led`:
+ *   byte 0:    mode (LED_HW_MODE_*)
+ *   bytes 1-10: mode-specific effect data
+ *
+ * This function extracts the mode, colors, duration and brightness
+ * without applying any brightness-to-RGB scaling — that is the
+ * serialization side's concern. */
+pub fn parse_led_payload(payload: &[u8]) -> DecodedLedState {
+    use crate::device::{Color, LedMode, RgbColor};
+
+    let mut state = DecodedLedState {
+        mode: LedMode::Off,
+        color: Color::default(),
+        secondary_color: Color::default(),
+        effect_duration: 0,
+        brightness: 255,
+    };
+
+    if payload.len() < LED_PAYLOAD_SIZE {
+        return state;
+    }
+
+    let mode_byte = payload[0];
+
+    match mode_byte {
+        LED_HW_MODE_OFF => {
+            state.mode = LedMode::Off;
+        }
+        LED_HW_MODE_FIXED => {
+            state.mode = LedMode::Solid;
+            state.color = Color::from_rgb(RgbColor {
+                r: payload[1],
+                g: payload[2],
+                b: payload[3],
+            });
+        }
+        LED_HW_MODE_CYCLE => {
+            state.mode = LedMode::Cycle;
+            state.effect_duration =
+                u32::from(u16::from_be_bytes([payload[6], payload[7]]));
+            state.brightness = u32::from(payload[8]) * 255 / 100;
+        }
+        LED_HW_MODE_COLOR_WAVE => {
+            state.mode = LedMode::ColorWave;
+            state.effect_duration =
+                u32::from(u16::from_be_bytes([payload[6], payload[7]]));
+            state.brightness = u32::from(payload[8]) * 255 / 100;
+        }
+        LED_HW_MODE_STARLIGHT => {
+            state.mode = LedMode::Starlight;
+            state.color = Color::from_rgb(RgbColor {
+                r: payload[1],
+                g: payload[2],
+                b: payload[3],
+            });
+            state.secondary_color = Color::from_rgb(RgbColor {
+                r: payload[4],
+                g: payload[5],
+                b: payload[6],
+            });
+        }
+        LED_HW_MODE_BREATHING => {
+            state.mode = LedMode::Breathing;
+            state.color = Color::from_rgb(RgbColor {
+                r: payload[1],
+                g: payload[2],
+                b: payload[3],
+            });
+            state.effect_duration =
+                u32::from(u16::from_be_bytes([payload[4], payload[5]]));
+            /* byte 6 = waveform */
+            state.brightness = u32::from(payload[7]) * 255 / 100;
+        }
+        _ => { /* Unknown mode — keep defaults (Off). */ }
+    }
+
+    state
+}
+
 /* Feature 0x8100 Button Data */
 pub const BUTTON_TYPE_MACRO: u8 = 0x00;
 pub const BUTTON_TYPE_HID: u8 = 0x80;
@@ -270,6 +367,134 @@ impl HidppReport {
             _ => None,
         }
     }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Shared matcher helpers for DeviceIo::request() closures                   */
+/* -------------------------------------------------------------------------- */
+
+/* Result of matching a HID++ 1.0 register response.
+ *
+ * Encapsulates the parse → error-check → field-match → extract pattern
+ * that every register read/write closure in hidpp10.rs duplicates. */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hidpp10MatchResult {
+    Short([u8; 3]),
+    Long([u8; 16]),
+    NoMatch,
+}
+
+/* Match a raw buffer against an expected HID++ 1.0 register response.
+ *
+ * Returns `Short(params)` or `Long(params)` when the report matches
+ * the expected (device_index, sub_id, register) triple and is not an
+ * error report.  Returns `NoMatch` for everything else (parse failure,
+ * error reports, field mismatches, non-HID++ data). */
+pub fn match_hidpp10_register(
+    buf: &[u8],
+    expected_device: u8,
+    expected_sub_id: u8,
+    expected_register: u8,
+) -> Hidpp10MatchResult {
+    let Some(report) = HidppReport::parse(buf) else {
+        return Hidpp10MatchResult::NoMatch;
+    };
+    if report.is_error() {
+        return Hidpp10MatchResult::NoMatch;
+    }
+    match report {
+        HidppReport::Short { device_index, sub_id, address, params }
+            if device_index == expected_device
+                && sub_id == expected_sub_id
+                && address == expected_register =>
+        {
+            Hidpp10MatchResult::Short(params)
+        }
+        HidppReport::Long { device_index, sub_id, address, params }
+            if device_index == expected_device
+                && sub_id == expected_sub_id
+                && address == expected_register =>
+        {
+            Hidpp10MatchResult::Long(params)
+        }
+        _ => Hidpp10MatchResult::NoMatch,
+    }
+}
+
+/* Result of matching an HID++ 2.0 feature response.
+ *
+ * Encapsulates the three-step matcher pattern used by every
+ * feature_request variant: (1) check for HID++ error, (2) match
+ * Long response, (3) match Short acknowledgment. */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hidpp20MatchResult {
+    /* Successful response with 16-byte params (Short acks are zero-padded). */
+    Ok([u8; 16]),
+    /* HID++ error with the raw error code byte. */
+    HidppErr(u8),
+    /* Report did not match the expected feature. */
+    NoMatch,
+}
+
+/* Match a raw buffer against an expected HID++ 2.0 feature response.
+ *
+ * Checks for error reports first (both Long 0xFF and Short 0x8F),
+ * then matches successful Long responses (full 16-byte params), then
+ * successful Short responses (3-byte params zero-padded to 16). */
+pub fn match_hidpp20_feature_response(
+    buf: &[u8],
+    expected_device: u8,
+    expected_feature_index: u8,
+) -> Hidpp20MatchResult {
+    let Some(report) = HidppReport::parse(buf) else {
+        return Hidpp20MatchResult::NoMatch;
+    };
+
+    /* 1. Check for HID++ error (Long 0xFF or Short 0x8F). */
+    if let Some(code) = report.hidpp20_error_code(expected_device, expected_feature_index) {
+        return Hidpp20MatchResult::HidppErr(code);
+    }
+
+    /* 2. Successful Long response. */
+    if let HidppReport::Long { device_index, sub_id, params, .. } = &report {
+        if *device_index == expected_device && *sub_id == expected_feature_index {
+            return Hidpp20MatchResult::Ok(*params);
+        }
+    }
+
+    /* 3. Successful Short response (SET acknowledgment). */
+    if let HidppReport::Short { device_index, sub_id, params, .. } = &report {
+        if *device_index == expected_device && *sub_id == expected_feature_index {
+            let mut long_params = [0u8; 16];
+            long_params[..3].copy_from_slice(params);
+            return Hidpp20MatchResult::Ok(long_params);
+        }
+    }
+
+    Hidpp20MatchResult::NoMatch
+}
+
+/* Construct an `anyhow::Error` for a HID++ 2.0 feature error response.
+ *
+ * This is the common error conversion used by feature_request,
+ * short_feature_request, and short_feature_request_with_params. */
+pub fn hidpp20_feature_error(code: u8, feature_index: u8, function: u8) -> anyhow::Error {
+    let name = hidpp20_error_name(code);
+    anyhow::anyhow!(
+        "HID++ error {name} (0x{code:02X}) for feature 0x{feature_index:02X} fn={function}"
+    )
+}
+
+/* Decode a HID++ 2.0 report-rate bitmap (from feature 0x8060
+ * getReportRateList) into a list of supported rates in Hz.
+ *
+ * Each set bit `n` (0-based) represents a supported rate of
+ * `1000 / (n + 1)` Hz.  Bit 0 = 1000 Hz, bit 1 = 500 Hz, etc. */
+pub fn decode_report_rate_bitmap(bitmap: u8) -> Vec<u32> {
+    (0..8u32)
+        .filter(|bit| bitmap & (1 << bit) != 0)
+        .map(|bit| 1000 / (bit + 1))
+        .collect()
 }
 
 /* Human-readable name for a HID++ 2.0 error code.                 */
@@ -655,5 +880,202 @@ mod tests {
         /* "123456789" is the standard CRC-CCITT test vector → 0x29B1. */
         let data = b"123456789";
         assert_eq!(compute_ccitt_crc(data), 0x29B1);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* HID++ 1.0 register matcher tests                                   */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn hidpp10_match_short_success() {
+        let buf = build_short_report(0xFF, 0x81, 0x63, [0xAA, 0xBB, 0xCC]);
+        let result = match_hidpp10_register(&buf, 0xFF, 0x81, 0x63);
+        assert_eq!(result, Hidpp10MatchResult::Short([0xAA, 0xBB, 0xCC]));
+    }
+
+    #[test]
+    fn hidpp10_match_long_success() {
+        let mut params = [0u8; 16];
+        params[0] = 0x42;
+        let buf = build_long_report(0x01, 0x83, 0x63, params);
+        let result = match_hidpp10_register(&buf, 0x01, 0x83, 0x63);
+        assert_eq!(result, Hidpp10MatchResult::Long(params));
+    }
+
+    #[test]
+    fn hidpp10_match_error_report() {
+        /* Error sub_id 0x8F should yield NoMatch. */
+        let buf = build_short_report(0xFF, HIDPP10_ERROR, 0x63, [0x00, 0x02, 0x00]);
+        let result = match_hidpp10_register(&buf, 0xFF, 0x81, 0x63);
+        assert_eq!(result, Hidpp10MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn hidpp10_match_wrong_fields() {
+        /* Correct format but wrong device index → NoMatch. */
+        let buf = build_short_report(0x01, 0x81, 0x63, [0xAA, 0xBB, 0xCC]);
+        let result = match_hidpp10_register(&buf, 0xFF, 0x81, 0x63);
+        assert_eq!(result, Hidpp10MatchResult::NoMatch);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* HID++ 2.0 feature response matcher tests                           */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn hidpp20_match_long_success() {
+        let mut params = [0u8; 16];
+        params[0] = 0x42;
+        params[1] = 0x13;
+        let buf = build_long_report(0xFF, 0x05, 0x30, params);
+        let result = match_hidpp20_feature_response(&buf, 0xFF, 0x05);
+        assert_eq!(result, Hidpp20MatchResult::Ok(params));
+    }
+
+    #[test]
+    fn hidpp20_match_short_ack() {
+        /* Short acknowledgment: 3 params zero-padded to 16. */
+        let buf = build_short_report(0xFF, 0x05, 0x10, [0xAA, 0xBB, 0x00]);
+        let result = match_hidpp20_feature_response(&buf, 0xFF, 0x05);
+        let mut expected = [0u8; 16];
+        expected[0] = 0xAA;
+        expected[1] = 0xBB;
+        assert_eq!(result, Hidpp20MatchResult::Ok(expected));
+    }
+
+    #[test]
+    fn hidpp20_match_long_error() {
+        /* Long error: sub_id = 0xFF, params[1] = error_code. */
+        let mut params = [0u8; 16];
+        params[0] = 0x30; /* (fn << 4 | sw_id) */
+        params[1] = 0x02; /* INVALID_ARGUMENT */
+        let buf = build_long_report(0xFF, HIDPP20_ERROR, 0x05, params);
+        let result = match_hidpp20_feature_response(&buf, 0xFF, 0x05);
+        assert_eq!(result, Hidpp20MatchResult::HidppErr(0x02));
+    }
+
+    #[test]
+    fn hidpp20_match_short_error() {
+        /* Short error: sub_id = 0x8F, params[1] = error_code. */
+        let buf = build_short_report(0xFF, HIDPP10_ERROR, 0x05, [0x30, 0x02, 0x00]);
+        let result = match_hidpp20_feature_response(&buf, 0xFF, 0x05);
+        assert_eq!(result, Hidpp20MatchResult::HidppErr(0x02));
+    }
+
+    #[test]
+    fn hidpp20_match_wrong_feature() {
+        let mut params = [0u8; 16];
+        params[0] = 0x42;
+        let buf = build_long_report(0xFF, 0x05, 0x30, params);
+        /* Expected feature 0x06, but report has 0x05 → NoMatch. */
+        let result = match_hidpp20_feature_response(&buf, 0xFF, 0x06);
+        assert_eq!(result, Hidpp20MatchResult::NoMatch);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* LED payload parser tests                                           */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn parse_led_off() {
+        let payload = [0u8; LED_PAYLOAD_SIZE];
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::Off);
+    }
+
+    #[test]
+    fn parse_led_solid() {
+        let mut payload = [0u8; LED_PAYLOAD_SIZE];
+        payload[0] = LED_HW_MODE_FIXED;
+        payload[1] = 0xFF;
+        payload[2] = 0x80;
+        payload[3] = 0x00;
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::Solid);
+        let rgb = state.color.to_rgb();
+        assert_eq!(rgb.r, 0xFF);
+        assert_eq!(rgb.g, 0x80);
+        assert_eq!(rgb.b, 0x00);
+    }
+
+    #[test]
+    fn parse_led_cycle() {
+        let mut payload = [0u8; LED_PAYLOAD_SIZE];
+        payload[0] = LED_HW_MODE_CYCLE;
+        /* period 5000 = 0x1388 big-endian */
+        payload[6] = 0x13;
+        payload[7] = 0x88;
+        /* brightness 100% */
+        payload[8] = 100;
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::Cycle);
+        assert_eq!(state.effect_duration, 5000);
+        assert_eq!(state.brightness, 255);
+    }
+
+    #[test]
+    fn parse_led_starlight() {
+        let mut payload = [0u8; LED_PAYLOAD_SIZE];
+        payload[0] = LED_HW_MODE_STARLIGHT;
+        payload[1] = 10; payload[2] = 20; payload[3] = 30;
+        payload[4] = 40; payload[5] = 50; payload[6] = 60;
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::Starlight);
+        let c1 = state.color.to_rgb();
+        assert_eq!((c1.r, c1.g, c1.b), (10, 20, 30));
+        let c2 = state.secondary_color.to_rgb();
+        assert_eq!((c2.r, c2.g, c2.b), (40, 50, 60));
+    }
+
+    #[test]
+    fn parse_led_breathing() {
+        let mut payload = [0u8; LED_PAYLOAD_SIZE];
+        payload[0] = LED_HW_MODE_BREATHING;
+        payload[1] = 0; payload[2] = 255; payload[3] = 0;
+        /* period 2000 = 0x07D0 */
+        payload[4] = 0x07; payload[5] = 0xD0;
+        /* byte 6 = waveform (ignored) */
+        /* brightness 78% → 78*255/100 = 198 */
+        payload[7] = 78;
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::Breathing);
+        let rgb = state.color.to_rgb();
+        assert_eq!((rgb.r, rgb.g, rgb.b), (0, 255, 0));
+        assert_eq!(state.effect_duration, 2000);
+        assert_eq!(state.brightness, 78 * 255 / 100);
+    }
+
+    #[test]
+    fn parse_led_color_wave() {
+        let mut payload = [0u8; LED_PAYLOAD_SIZE];
+        payload[0] = LED_HW_MODE_COLOR_WAVE;
+        payload[6] = 0x0B; payload[7] = 0xB8; /* period 3000 */
+        payload[8] = 49; /* brightness 49% */
+        let state = parse_led_payload(&payload);
+        assert_eq!(state.mode, LedMode::ColorWave);
+        assert_eq!(state.effect_duration, 3000);
+        assert_eq!(state.brightness, 49 * 255 / 100);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Report rate bitmap decoder tests                                   */
+    /* ------------------------------------------------------------------ */
+
+    #[test]
+    fn decode_rate_bitmap_typical() {
+        /* Bits 0,1,3 set → 1000, 500, 250 Hz. */
+        let rates = decode_report_rate_bitmap(0b00001011);
+        assert_eq!(rates, vec![1000, 500, 250]);
+    }
+
+    #[test]
+    fn decode_rate_bitmap_empty() {
+        assert_eq!(decode_report_rate_bitmap(0x00), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn decode_rate_bitmap_all() {
+        let rates = decode_report_rate_bitmap(0xFF);
+        assert_eq!(rates, vec![1000, 500, 333, 250, 200, 166, 142, 125]);
     }
 }

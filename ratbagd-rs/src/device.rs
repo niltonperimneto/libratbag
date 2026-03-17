@@ -1,7 +1,9 @@
 /* Canonical device state shared across DBus objects and drivers: device/profile/resolution/button
  * and LED structures plus enums for actions, DPI, and LED modes. */
+use serde::Serialize;
+
 /// Button action types exposed over DBus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[repr(u32)]
 pub enum ActionType {
     #[default]
@@ -59,7 +61,7 @@ pub mod special_action {
 }
 
 /* Compact RGB color used for LED effect payloads. */
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RgbColor {
     pub r: u8,
     pub g: u8,
@@ -67,7 +69,7 @@ pub struct RgbColor {
 }
 
 /* Color as an RGB triplet exposed over DBus (u32 fields for compatibility). */
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Color {
     pub red: u32,
     pub green: u32,
@@ -99,7 +101,7 @@ impl Color {
  * (Off=0, On=1, Cycle=2, Breathing=3) so that existing clients like
  * Piper work without translation.  Values 4+ are Rust-only extensions
  * for hardware modes not present in the C codebase. */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(u32)]
 pub enum LedMode {
     Off = 0,
@@ -128,7 +130,7 @@ impl LedMode {
 }
 
 /* Resolution value, either unified or per-axis. */
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub enum Dpi {
     #[default]
     Unknown,
@@ -140,7 +142,7 @@ pub enum Dpi {
 }
 
 /* Device state synced from hardware. */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
     pub sysname: String,
     pub name: String,
@@ -149,6 +151,7 @@ pub struct DeviceInfo {
     /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse, 3=keyboard */
     pub device_type: u32,
     pub profiles: Vec<ProfileInfo>,
+    #[serde(skip)]
     pub driver_config: crate::device_database::DriverConfig,
 }
 
@@ -303,7 +306,7 @@ pub const REPORT_RATE_MIN: u32 = 125;
 pub const REPORT_RATE_MAX: u32 = 8000;
 
 /// Profile state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ProfileInfo {
     pub index: u32,
     pub name: String,
@@ -397,7 +400,7 @@ impl ProfileInfo {
 }
 
 /// Resolution state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ResolutionInfo {
     pub index: u32,
     pub dpi: Dpi,
@@ -409,7 +412,7 @@ pub struct ResolutionInfo {
 }
 
 /// Button mapping state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ButtonInfo {
     pub index: u32,
     pub action_type: ActionType,
@@ -437,7 +440,7 @@ impl Default for ButtonInfo {
 }
 
 /// LED state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LedInfo {
     pub index: u32,
     pub mode: LedMode,

@@ -15,13 +15,14 @@ pub mod sinowealth;
 pub mod sinowealth_nubwo;
 pub mod steelseries;
 
-use nix::libc;
+use std::collections::VecDeque;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use nix::ioctl_readwrite_buf;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, trace, warn};
@@ -100,26 +101,26 @@ const SINGLE_READ_TIMEOUT: Duration = Duration::from_millis(500);
 const HIDPP_SHORT_REPORT_ID: u8 = 0x10;
 const HIDPP_LONG_REPORT_ID: u8 = 0x11;
 
-/* Compute the `HIDIOCGFEATURE(len)` ioctl request number.        */
-/*                                                                */
-/* Linux hidraw.h: `_IOC(_IOC_READ|_IOC_WRITE, 'H', 0x07, len)`. */
-fn hid_get_feature_req(len: usize) -> libc::c_ulong {
-    let ioc_readwrite: libc::c_ulong = 3;
-    let ioc_type: libc::c_ulong = b'H' as libc::c_ulong;
-    let ioc_nr: libc::c_ulong = 0x07;
-    (ioc_readwrite << 30) | (ioc_type << 8) | ioc_nr | ((len as libc::c_ulong) << 16)
-}
+/* HIDIOCGFEATURE(len): `_IOC(_IOC_READ|_IOC_WRITE, 'H', 0x07, len)`.    */
+/* HIDIOCSFEATURE(len): `_IOC(_IOC_READ|_IOC_WRITE, 'H', 0x06, len)`.    */
+/*                                                                        */
+/* Both are `_IOC_READ|_IOC_WRITE` direction in the kernel's hidraw.h     */
+/* regardless of whether the caller is reading or writing a feature        */
+/* report. The nix macro encodes `size_of_val(data)` into the request      */
+/* number at each call site, matching the kernel's variable-length ioctl   */
+/* encoding. This is platform-correct on any architecture nix supports     */
+/* (the macro delegates to `request_code_readwrite!` which uses the        */
+/* target's `_IOC` layout).                                                */
+ioctl_readwrite_buf!(hidioc_gfeature, b'H', 0x07, u8);
+ioctl_readwrite_buf!(hidioc_sfeature, b'H', 0x06, u8);
 
-/* Compute the `HIDIOCSFEATURE(len)` ioctl request number.        */
-/*                                                                */
-/* Linux hidraw.h: `_IOC(_IOC_READ|_IOC_WRITE, 'H', 0x06, len)`. */
-#[allow(dead_code)]
-fn hid_set_feature_req(len: usize) -> libc::c_ulong {
-    let ioc_readwrite: libc::c_ulong = 3;
-    let ioc_type: libc::c_ulong = b'H' as libc::c_ulong;
-    let ioc_nr: libc::c_ulong = 0x06;
-    (ioc_readwrite << 30) | (ioc_type << 8) | ioc_nr | ((len as libc::c_ulong) << 16)
-}
+/* Maximum number of unsolicited HID++ events buffered during a          */
+/* `request()` call.  If the device emits more events than this during   */
+/* a single command exchange (e.g. rapid profile-switch notifications    */
+/* during a long EEPROM write), the oldest events are evicted.  128      */
+/* events is generous — a typical device emits fewer than 10 unsolicited */
+/* reports during even the slowest commit cycle.                         */
+const MAX_PENDING_EVENTS: usize = 128;
 
 /* Async wrapper around a `/dev/hidraw` file descriptor. */
 /*                                                       */
@@ -131,8 +132,12 @@ pub struct DeviceIo {
     /* Reports seen during `request()` that were valid HID++ but did not
      * match the pending command.  These are unsolicited hardware events
      * (e.g. profile-switch notifications) that the actor should forward
-     * to `DeviceDriver::handle_event` after each I/O batch. */
-    pending_events: Vec<Vec<u8>>,
+     * to `DeviceDriver::handle_event` after each I/O batch.
+     *
+     * Bounded to `MAX_PENDING_EVENTS` — oldest events are evicted when
+     * the buffer is full, preventing unbounded memory growth under
+     * pathological device behavior. */
+    pending_events: VecDeque<Vec<u8>>,
 }
 
 impl DeviceIo {
@@ -148,7 +153,7 @@ impl DeviceIo {
         Ok(Self {
             file,
             path: path.to_path_buf(),
-            pending_events: Vec::new(),
+            pending_events: VecDeque::new(),
         })
     }
 
@@ -180,19 +185,18 @@ impl DeviceIo {
     /* returns the total number of bytes written.                  */
     pub fn get_feature_report(&self, buf: &mut [u8]) -> Result<usize, DriverError> {
         let fd = self.file.as_raw_fd();
-        let req = hid_get_feature_req(buf.len());
 
-        /* SAFETY: `fd` is a valid open file descriptor for the     */
-        /* lifetime of this call. `buf` is a live mutable slice and */
-        /* its length is encoded into `req` via the ioctl macro.    */
-        /* The kernel reads exactly `buf.len()` bytes from this fd. */
-        let res = unsafe { libc::ioctl(fd, req, buf.as_mut_ptr()) };
+        /* SAFETY: `fd` is a valid open file descriptor obtained    */
+        /* from `self.file` which is alive for the duration of this */
+        /* `&self` borrow. `as_raw_fd()` does not consume the File, */
+        /* so the descriptor cannot be closed between extraction    */
+        /* and the ioctl call. The nix macro encodes `buf.len()`    */
+        /* into the ioctl request number and passes `buf.as_mut_ptr()` */
+        /* as the data argument. The kernel fills exactly            */
+        /* `buf.len()` bytes from this fd.                          */
+        let n = unsafe { hidioc_gfeature(fd, buf) }
+            .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
 
-        if res < 0 {
-            return Err(DriverError::IoctlFailed(std::io::Error::last_os_error()));
-        }
-
-        let n = res as usize;
         debug!("GET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
         Ok(n)
     }
@@ -203,19 +207,20 @@ impl DeviceIo {
     /* bytes accepted by the kernel.                               */
     pub fn set_feature_report(&self, buf: &[u8]) -> Result<usize, DriverError> {
         let fd = self.file.as_raw_fd();
-        let req = hid_set_feature_req(buf.len());
 
-        /* SAFETY: `fd` is a valid open file descriptor for the     */
-        /* lifetime of this call. `buf` is a live immutable slice   */
-        /* and its length is encoded into `req` via the ioctl macro. */
-        /* The kernel reads exactly `buf.len()` bytes from this fd. */
-        let res = unsafe { libc::ioctl(fd, req, buf.as_ptr()) };
+        /* The kernel's HIDIOCSFEATURE is defined with _IOC_READ|_IOC_WRITE   */
+        /* direction bits even though it only reads FROM the buffer.  The nix  */
+        /* `ioctl_readwrite_buf!` macro therefore requires `&mut [u8]`.  We    */
+        /* copy to a mutable temporary to satisfy this requirement without     */
+        /* exposing the caller to an unnecessary `&mut` constraint.            */
+        let mut tmp = buf.to_vec();
 
-        if res < 0 {
-            return Err(DriverError::IoctlFailed(std::io::Error::last_os_error()));
-        }
+        /* SAFETY: Same fd-validity argument as `get_feature_report`.  The     */
+        /* kernel reads `tmp.len()` bytes from the buffer; it does not write   */
+        /* back into it despite the readwrite direction bits.                   */
+        let n = unsafe { hidioc_sfeature(fd, &mut tmp) }
+            .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
 
-        let n = res as usize;
         debug!("SET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
         Ok(n)
     }
@@ -293,8 +298,12 @@ impl DeviceIo {
 
                         /* The report was valid HID++ but did not match our
                          * pending command — buffer it as an unsolicited
-                         * hardware event for the actor to process later. */
-                        self.pending_events.push(buf[..n].to_vec());
+                         * hardware event for the actor to process later.
+                         * Evict the oldest event if the buffer is full. */
+                        if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                            self.pending_events.pop_front();
+                        }
+                        self.pending_events.push_back(buf[..n].to_vec());
                     }
                     Ok(Err(e)) => {
                         warn!("Read error on attempt {attempt}: {e}");
@@ -319,7 +328,7 @@ impl DeviceIo {
     /* Drain all unsolicited HID++ events that were buffered during
      * `request()` calls.  The actor calls this after each I/O batch
      * and forwards the reports to `DeviceDriver::handle_event`. */
-    pub fn drain_events(&mut self) -> Vec<Vec<u8>> {
+    pub fn drain_events(&mut self) -> VecDeque<Vec<u8>> {
         std::mem::take(&mut self.pending_events)
     }
 }

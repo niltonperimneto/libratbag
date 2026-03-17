@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::device::DeviceInfo;
 use crate::driver::DeviceIo;
 
-use super::hidpp::{self, HidppReport, DEVICE_IDX_CORDED, DEVICE_IDX_RECEIVER};
+use super::hidpp::{self, Hidpp10MatchResult, DEVICE_IDX_CORDED, DEVICE_IDX_RECEIVER};
 
 /* HID++ 1.0 register addresses */
 const REG_PROTOCOL_VERSION: u8 = 0x00;
@@ -82,16 +82,6 @@ impl Hidpp10ResolutionLongPayload {
     pub fn set_yres(&mut self, res: u16) { self.yres = res.to_le_bytes(); }
 }
 
-#[allow(dead_code)]
-const CMD_HOT_CONTROL: u8 = 0xA1;
-#[allow(dead_code)]
-const HOT_NOTIFICATION: u8 = 0x50;
-#[allow(dead_code)]
-const HOT_WRITE: u8 = 0x92;
-#[allow(dead_code)]
-const HOT_CONTINUE: u8 = 0x93;
-
-
 
 /* Protocol version stored after a successful probe. */
 #[derive(Debug, Clone, Copy, Default)]
@@ -128,22 +118,8 @@ impl Hidpp10Driver {
         );
 
         io.request(&request, 20, 2, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() {
-                return None;
-            }
-            match report {
-                HidppReport::Short {
-                    device_index,
-                    sub_id,
-                    address,
-                    params,
-                } if device_index == idx
-                    && sub_id == SUB_ID_GET_REGISTER
-                    && address == REG_PROTOCOL_VERSION =>
-                {
-                    Some(params)
-                }
+            match hidpp::match_hidpp10_register(buf, idx, SUB_ID_GET_REGISTER, REG_PROTOCOL_VERSION) {
+                Hidpp10MatchResult::Short(p) => Some(p),
                 _ => None,
             }
         })
@@ -167,17 +143,8 @@ impl Hidpp10Driver {
 
         let dev_idx = self.device_index;
         io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() {
-                return None;
-            }
-            match report {
-                HidppReport::Short {
-                    device_index,
-                    sub_id,
-                    address,
-                    params,
-                } if device_index == dev_idx && sub_id == SUB_ID_GET_REGISTER && address == register => Some(params),
+            match hidpp::match_hidpp10_register(buf, dev_idx, SUB_ID_GET_REGISTER, register) {
+                Hidpp10MatchResult::Short(p) => Some(p),
                 _ => None,
             }
         })
@@ -201,17 +168,8 @@ impl Hidpp10Driver {
 
         let dev_idx = self.device_index;
         io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() {
-                return None;
-            }
-            match report {
-                HidppReport::Short {
-                    device_index,
-                    sub_id,
-                    address,
-                    params,
-                } if device_index == dev_idx && sub_id == SUB_ID_SET_REGISTER && address == register => Some(params),
+            match hidpp::match_hidpp10_register(buf, dev_idx, SUB_ID_SET_REGISTER, register) {
+                Hidpp10MatchResult::Short(p) => Some(p),
                 _ => None,
             }
         })
@@ -233,17 +191,8 @@ impl Hidpp10Driver {
 
         let dev_idx = self.device_index;
         io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() {
-                return None;
-            }
-            match report {
-                HidppReport::Long {
-                    device_index,
-                    sub_id,
-                    address,
-                    params,
-                } if device_index == dev_idx && sub_id == SUB_ID_GET_LONG_REGISTER && address == register => Some(params),
+            match hidpp::match_hidpp10_register(buf, dev_idx, SUB_ID_GET_LONG_REGISTER, register) {
+                Hidpp10MatchResult::Long(p) => Some(p),
                 _ => None,
             }
         })
@@ -266,128 +215,13 @@ impl Hidpp10Driver {
 
         let dev_idx = self.device_index;
         io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() {
-                return None;
-            }
-            match report {
-                HidppReport::Long {
-                    device_index,
-                    sub_id,
-                    address,
-                    params,
-                } if device_index == dev_idx && sub_id == SUB_ID_SET_LONG_REGISTER && address == register => Some(params),
+            match hidpp::match_hidpp10_register(buf, dev_idx, SUB_ID_SET_LONG_REGISTER, register) {
+                Hidpp10MatchResult::Long(p) => Some(p),
                 _ => None,
             }
         })
         .await
         .context("HID++ 1.0 SET_LONG_REGISTER failed")
-    }
-
-    #[allow(dead_code)]
-    async fn hot_ctrl_reset(&self, io: &mut DeviceIo) -> Result<()> {
-        let request = hidpp::build_short_report(
-            self.device_index,
-            SUB_ID_SET_REGISTER,
-            CMD_HOT_CONTROL,
-            [0x01, 0x00, 0x00],
-        );
-        let dev_idx = self.device_index;
-        io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Short { device_index, sub_id, address, params: _ }
-                    if device_index == dev_idx && sub_id == SUB_ID_SET_REGISTER && address == CMD_HOT_CONTROL => Some(()),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 HOT ctrl reset failed")
-    }
-
-    #[allow(dead_code)]
-    async fn hot_request_command(&self, io: &mut DeviceIo, data: [u8; 20], expected_id: u8) -> Result<()> {
-        let dev_idx = self.device_index;
-        io.request(&data, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Long { device_index, sub_id, address: _, params }
-                    if device_index == dev_idx && sub_id == HOT_NOTIFICATION && params[0] == expected_id => Some(()),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 HOT request command failed")
-    }
-
-    #[allow(dead_code)]
-    async fn send_hot_chunk(
-        &self,
-        io: &mut DeviceIo,
-        index: u8,
-        first: bool,
-        dst_page: u8,
-        dst_offset: u16,
-        data: &[u8],
-    ) -> Result<usize> {
-        let mut buffer = [0u8; 20];
-        buffer[0] = hidpp::REPORT_ID_LONG;
-        buffer[1] = self.device_index;
-        
-        let mut offset = 2;
-        if first {
-            if !dst_offset.is_multiple_of(2) {
-                return Err(anyhow::anyhow!("Writing memory with odd offset is not supported"));
-            }
-            buffer[offset] = HOT_WRITE; offset += 1;
-            buffer[offset] = index; offset += 1;
-            
-            let mut bytes = [0u8; 9];
-            bytes[0] = 0x01; // id
-            bytes[1] = dst_page;
-            bytes[2] = (dst_offset / 2) as u8;
-            bytes[3..5].copy_from_slice(&[0, 0]); // zero
-            bytes[5..7].copy_from_slice(&(data.len() as u16).to_be_bytes()); // size (Big Endian)
-            bytes[7..9].copy_from_slice(&[0, 0]); // zero1
-            buffer[offset..offset+9].copy_from_slice(&bytes);
-            offset += 9;
-        } else {
-            buffer[offset] = HOT_CONTINUE; offset += 1;
-            buffer[offset] = index; offset += 1;
-        }
-        
-        let count = data.len().min(20 - offset);
-        if count == 0 {
-            return Err(anyhow::anyhow!("Invalid chunk size"));
-        }
-        
-        buffer[offset..offset+count].copy_from_slice(&data[..count]);
-        self.hot_request_command(io, buffer, index).await?;
-        
-        Ok(count)
-    }
-
-    #[allow(dead_code)]
-    async fn send_hot_payload(
-        &self,
-        io: &mut DeviceIo,
-        dst_page: u8,
-        dst_offset: u16,
-        data: &[u8],
-    ) -> Result<()> {
-        self.hot_ctrl_reset(io).await?;
-        
-        let mut first = true;
-        let mut count = 0;
-        let mut index = 0;
-        
-        while count < data.len() {
-            let chunk_data = if first { data } else { &data[count..] }; // Notice the size format inside `send_hot_chunk` needs total original `data.len()` on `first=true`
-            let written = self.send_hot_chunk(io, index, first, dst_page, dst_offset, chunk_data).await?;
-            first = false;
-            count += written;
-            index += 1;
-        }
-        
-        Ok(())
     }
 
     async fn read_resolution(&self, io: &mut DeviceIo, profile: &mut crate::device::ProfileInfo) -> Result<()> {
@@ -436,7 +270,7 @@ impl Hidpp10Driver {
     async fn write_refresh_rate(&self, io: &mut DeviceIo, profile: &crate::device::ProfileInfo) -> Result<()> {
         const REG_USB_REFRESH_RATE: u8 = 0x64;
         if profile.report_rate > 0 {
-            let rate = (1000 / profile.report_rate) as u8;
+            let rate = ((1000 / profile.report_rate).min(255)) as u8;
             self.set_register(io, REG_USB_REFRESH_RATE, [rate, 0, 0]).await?;
             tracing::debug!("HID++ 1.0: committed report rate = {} Hz", profile.report_rate);
         }

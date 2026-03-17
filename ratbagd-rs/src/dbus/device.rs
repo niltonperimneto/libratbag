@@ -94,22 +94,39 @@ impl RatbagDevice {
                     if let Ok(iface_ref) =
                         server.interface::<_, RatbagProfile>(path.as_str()).await
                     {
-                        let _ = iface_ref
+                        if let Err(e) = iface_ref
                             .get()
                             .await
                             .is_dirty_changed(iface_ref.signal_emitter())
-                            .await;
+                            .await
+                        {
+                            tracing::warn!("Failed to emit IsDirty signal for {path}: {e}");
+                        }
                     }
                 }
 
                 0
             }
-            Err(e) => {
-                tracing::error!("Commit failed for {}: {e}", self.path);
+            Err(commit_err) => {
+                tracing::error!("Commit failed for {}: {commit_err}", self.path);
                 let _ = Self::resync(&emitter).await;
                 1
             }
         }
+    }
+
+    /// Return the entire device state as a JSON string in a single call.
+    ///
+    /// This eliminates the need for clients to issue 67+ individual DBus
+    /// property reads to populate the full device tree.  The returned JSON
+    /// contains the device metadata plus every profile, resolution, button,
+    /// and LED — the same data exposed through the individual property
+    /// accessors.
+    async fn get_device_state(&self) -> zbus::fdo::Result<String> {
+        let info = self.info.read().await;
+        serde_json::to_string(&*info).map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to serialize device state: {e}"))
+        })
     }
 
     /// Signal emitted when an error occurs during commit.

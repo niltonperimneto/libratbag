@@ -94,11 +94,11 @@ fn is_quirk(info: &DeviceInfo, name: &str) -> bool {
 }
 
 fn is_senseiraw(info: &DeviceInfo) -> bool {
-    is_quirk(info, "STEELSERIES_QUIRK_SENSEIRAW")
+    is_quirk(info, "SenseiRAW")
 }
 
 fn is_rival100(info: &DeviceInfo) -> bool {
-    is_quirk(info, "STEELSERIES_QUIRK_RIVAL100")
+    is_quirk(info, "Rival100")
 }
 
 /* Resolve the DPI step from the driver config.  Most SteelSeries devices
@@ -139,13 +139,14 @@ impl DeviceDriver for SteelseriesDriver {
         let led_count = info.driver_config.leds.unwrap_or(0) as usize;
         let senseiraw = is_senseiraw(info);
 
-        /* Build the DPI list from the range specification if available. */
-        let dpi_list: Vec<u32> = info
-            .driver_config
-            .dpi_range
-            .as_ref()
-            .map(|r| (r.min..=r.max).step_by(r.step as usize).collect())
-            .unwrap_or_default();
+        /* Build the DPI list from the range or discrete list specification. */
+        let dpi_list: Vec<u32> = if let Some(ref r) = info.driver_config.dpi_range {
+            (r.min..=r.max).step_by(r.step as usize).collect()
+        } else if !info.driver_config.dpi_list.is_empty() {
+            info.driver_config.dpi_list.clone()
+        } else {
+            vec![]
+        };
 
         let report_rates = vec![125, 250, 500, 1000];
 
@@ -1063,4 +1064,173 @@ fn write_cycle_points(buf: &mut [u8], header_start: usize, points: &[CyclePoint]
     }
 
     points.len() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{ActionType, special_action};
+
+    #[test]
+    fn test_button_defaults_3_buttons() {
+        /* 3-button device: no button reaches the special index (5). */
+        let (at, val) = button_defaults_for_layout(0, 3);
+        assert_eq!(at, ActionType::Button);
+        assert_eq!(val, 1);
+        let (at, val) = button_defaults_for_layout(2, 3);
+        assert_eq!(at, ActionType::Button);
+        assert_eq!(val, 3);
+    }
+
+    #[test]
+    fn test_button_defaults_6_buttons() {
+        /* 6-button device: button 5 (index 5) is resolution cycle. */
+        let (at, val) = button_defaults_for_layout(4, 6);
+        assert_eq!(at, ActionType::Button);
+        assert_eq!(val, 5);
+        let (at, val) = button_defaults_for_layout(5, 6);
+        assert_eq!(at, ActionType::Special);
+        assert_eq!(val, special_action::RESOLUTION_CYCLE_UP);
+    }
+
+    #[test]
+    fn test_button_defaults_7_buttons() {
+        /* 7-button device: button 6 (index 6) is resolution cycle. */
+        let (at, val) = button_defaults_for_layout(5, 7);
+        assert_eq!(at, ActionType::Button);
+        assert_eq!(val, 6);
+        let (at, val) = button_defaults_for_layout(6, 7);
+        assert_eq!(at, ActionType::Special);
+        assert_eq!(val, special_action::RESOLUTION_CYCLE_UP);
+    }
+
+    #[test]
+    fn test_button_defaults_8_buttons() {
+        /* 8-button device: button 7 (index 7) is resolution cycle. */
+        let (at, val) = button_defaults_for_layout(6, 8);
+        assert_eq!(at, ActionType::Button);
+        assert_eq!(val, 7);
+        let (at, val) = button_defaults_for_layout(7, 8);
+        assert_eq!(at, ActionType::Special);
+        assert_eq!(val, special_action::RESOLUTION_CYCLE_UP);
+        /* Index 8+ maps to None. */
+        let (at, _) = button_defaults_for_layout(8, 9);
+        assert_eq!(at, ActionType::None);
+    }
+
+    #[test]
+    fn test_cycle_points_off() {
+        let led = crate::device::LedInfo {
+            index: 0,
+            mode: crate::device::LedMode::Off,
+            modes: vec![],
+            color: crate::device::Color::default(),
+            secondary_color: crate::device::Color::default(),
+            tertiary_color: crate::device::Color::default(),
+            color_depth: 3,
+            effect_duration: 1000,
+            brightness: 255,
+        };
+        let (repeat, points, duration) = build_cycle_points(&led);
+        assert!(!repeat);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].r, 0);
+        assert_eq!(duration, 5000);
+    }
+
+    #[test]
+    fn test_cycle_points_solid() {
+        let led = crate::device::LedInfo {
+            index: 0,
+            mode: crate::device::LedMode::Solid,
+            modes: vec![],
+            color: crate::device::Color { red: 0xFF, green: 0x80, blue: 0x00 },
+            secondary_color: crate::device::Color::default(),
+            tertiary_color: crate::device::Color::default(),
+            color_depth: 3,
+            effect_duration: 1000,
+            brightness: 255,
+        };
+        let (repeat, points, _) = build_cycle_points(&led);
+        assert!(!repeat);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].r, 0xFF);
+        assert_eq!(points[0].g, 0x80);
+        assert_eq!(points[0].b, 0x00);
+    }
+
+    #[test]
+    fn test_cycle_points_cycle_rainbow() {
+        let led = crate::device::LedInfo {
+            index: 0,
+            mode: crate::device::LedMode::Cycle,
+            modes: vec![],
+            color: crate::device::Color::default(),
+            secondary_color: crate::device::Color::default(),
+            tertiary_color: crate::device::Color::default(),
+            color_depth: 3,
+            effect_duration: 4000,
+            brightness: 255,
+        };
+        let (repeat, points, duration) = build_cycle_points(&led);
+        assert!(repeat);
+        assert_eq!(points.len(), 4);
+        /* Red → Green → Blue → Red */
+        assert_eq!((points[0].r, points[0].g, points[0].b), (0xFF, 0x00, 0x00));
+        assert_eq!((points[1].r, points[1].g, points[1].b), (0x00, 0xFF, 0x00));
+        assert_eq!((points[2].r, points[2].g, points[2].b), (0x00, 0x00, 0xFF));
+        assert_eq!((points[3].r, points[3].g, points[3].b), (0xFF, 0x00, 0x00));
+        assert_eq!(duration, 4000);
+    }
+
+    #[test]
+    fn test_cycle_points_breathing() {
+        let led = crate::device::LedInfo {
+            index: 0,
+            mode: crate::device::LedMode::Breathing,
+            modes: vec![],
+            color: crate::device::Color { red: 0, green: 0, blue: 255 },
+            secondary_color: crate::device::Color::default(),
+            tertiary_color: crate::device::Color::default(),
+            color_depth: 3,
+            effect_duration: 3000,
+            brightness: 255,
+        };
+        let (repeat, points, duration) = build_cycle_points(&led);
+        assert!(repeat);
+        assert_eq!(points.len(), 3);
+        /* Black → Color → Black */
+        assert_eq!((points[0].r, points[0].g, points[0].b), (0, 0, 0));
+        assert_eq!((points[1].r, points[1].g, points[1].b), (0, 0, 255));
+        assert_eq!((points[2].r, points[2].g, points[2].b), (0, 0, 0));
+        assert_eq!(duration, 3000);
+    }
+
+    #[test]
+    fn test_write_cycle_points_layout() {
+        /* Verify the buffer layout: 3-byte RGB header for the first point,
+         * then 4-byte (R,G,B,pos) entries for each point. */
+        let points = vec![
+            CyclePoint { r: 0xFF, g: 0x00, b: 0x00, pos: 0x00 },
+            CyclePoint { r: 0x00, g: 0xFF, b: 0x00, pos: 0x55 },
+        ];
+        let mut buf = [0u8; 64];
+        let header_start = 29;
+        let npoints = write_cycle_points(&mut buf, header_start, &points);
+        assert_eq!(npoints, 2);
+        /* 3-byte header: first point's RGB */
+        assert_eq!(buf[29], 0xFF);
+        assert_eq!(buf[30], 0x00);
+        assert_eq!(buf[31], 0x00);
+        /* Point 0 at color_idx (32) + 0*4 = 32 */
+        assert_eq!(buf[32], 0xFF);
+        assert_eq!(buf[33], 0x00);
+        assert_eq!(buf[34], 0x00);
+        assert_eq!(buf[35], 0x00);
+        /* Point 1 at color_idx (32) + 1*4 = 36 */
+        assert_eq!(buf[36], 0x00);
+        assert_eq!(buf[37], 0xFF);
+        assert_eq!(buf[38], 0x00);
+        assert_eq!(buf[39], 0x55);
+    }
 }
