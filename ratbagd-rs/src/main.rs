@@ -69,12 +69,12 @@ async fn main() -> Result<()> {
     /* Spawn the udev monitor for hidraw device hotplug.  The handle is
      * joined inside the select! block so that a monitor failure or panic
      * is surfaced instead of silently lost. */
-    let mut udev_handle = tokio::spawn(udev_monitor::run(device_tx, Arc::clone(&shutdown)));
+    let mut udev_handle = tokio::spawn(udev_monitor::run(device_tx.clone(), Arc::clone(&shutdown)));
 
     /* Multiplex the DBus server, udev monitor, and shutdown signal.
      * Whichever future completes first determines the exit path. */
     tokio::select! {
-        result = dbus::run_server(device_rx, device_db) => {
+        result = dbus::run_server(device_rx, device_tx.clone(), device_db) => {
             result?;
         }
         result = &mut udev_handle => {

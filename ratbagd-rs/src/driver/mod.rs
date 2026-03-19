@@ -27,6 +27,11 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, trace, warn};
 
+#[cfg(feature = "dev-hooks")]
+use std::collections::HashMap;
+#[cfg(feature = "dev-hooks")]
+use std::sync::{Arc, Mutex};
+
 use crate::device::DeviceInfo;
 
 /* Domain-specific error variants for all driver I/O operations. */
@@ -122,13 +127,155 @@ ioctl_readwrite_buf!(hidioc_sfeature, b'H', 0x06, u8);
 /* reports during even the slowest commit cycle.                         */
 const MAX_PENDING_EVENTS: usize = 128;
 
+/* ======================================================================== */
+/* Mock I/O backend (dev-hooks only)                                         */
+/* ======================================================================== */
+
+/* A single expected write → response pair in a mock I/O script.
+ *
+ * `expect_write` uses hex byte strings: exact bytes must match, or `..`
+ * as the last token means "match any remaining bytes".
+ *
+ * `respond` is a hex byte string returned on the next `read_report()`. */
+#[cfg(feature = "dev-hooks")]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MockExchange {
+    #[serde(default)]
+    pub comment: String,
+    pub expect_write: String,
+    pub respond: String,
+}
+
+/* Full I/O script: an ordered sequence of exchanges plus an initial
+ * feature report store (keyed by report ID as a decimal string). */
+#[cfg(feature = "dev-hooks")]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MockScriptSpec {
+    #[serde(default)]
+    pub exchanges: Vec<MockExchange>,
+    #[serde(default)]
+    pub feature_reports: HashMap<String, String>,
+}
+
+/* Runtime state for the mock backend. Wrapped in `Arc<Mutex<_>>` so that
+ * `GetMockIoLog` can read the write log from outside the actor. */
+#[cfg(feature = "dev-hooks")]
+#[derive(Debug)]
+pub struct MockState {
+    /* Ordered queue of exchanges; consumed front-to-back. */
+    exchanges: VecDeque<(Vec<u8>, Vec<u8>)>,
+    /* Queued responses from matched exchanges. */
+    response_queue: VecDeque<Vec<u8>>,
+    /* Feature report store: report_id → bytes (including report_id prefix). */
+    feature_reports: HashMap<u8, Vec<u8>>,
+    /* Every write_report / set_feature_report call recorded here. */
+    pub write_log: Vec<Vec<u8>>,
+}
+
+#[cfg(feature = "dev-hooks")]
+impl MockState {
+    fn from_spec(spec: MockScriptSpec) -> Self {
+        let exchanges: VecDeque<(Vec<u8>, Vec<u8>)> = spec
+            .exchanges
+            .into_iter()
+            .map(|ex| (parse_hex_pattern(&ex.expect_write), parse_hex_bytes(&ex.respond)))
+            .collect();
+
+        let feature_reports: HashMap<u8, Vec<u8>> = spec
+            .feature_reports
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let id = k.trim().parse::<u8>().ok()?;
+                Some((id, parse_hex_bytes(&v)))
+            })
+            .collect();
+
+        Self {
+            exchanges,
+            response_queue: VecDeque::new(),
+            feature_reports,
+            write_log: Vec::new(),
+        }
+    }
+
+    /* Try to match `written` against the front of the exchange queue.
+     * If matched, push the response onto the response queue and consume
+     * the exchange.  Wildcard byte 0x100 (represented as WILDCARD_BYTE
+     * in the pattern) matches any value. */
+    fn match_and_respond(&mut self, written: &[u8]) {
+        if let Some((pattern, _)) = self.exchanges.front() {
+            if pattern_matches(pattern, written) {
+                let (_, response) = self.exchanges.pop_front().unwrap();
+                self.response_queue.push_back(response);
+            }
+        }
+    }
+}
+
+/* Parse a hex string like "10 01 81 00 00 00 00" into bytes.
+ * The special token ".." is encoded as WILDCARD_BYTE (0xFF + 1 won't
+ * fit in u8, so we use a sentinel: 0xFE followed by 0xFE). We use a
+ * simpler approach: wildcard tokens are stored as-is and matching
+ * treats trailing `..` as "match any remaining". */
+#[cfg(feature = "dev-hooks")]
+fn parse_hex_bytes(s: &str) -> Vec<u8> {
+    s.split_whitespace()
+        .filter_map(|tok| u8::from_str_radix(tok, 16).ok())
+        .collect()
+}
+
+/* Parse a hex pattern that may end with ".." (match any remaining). */
+#[cfg(feature = "dev-hooks")]
+fn parse_hex_pattern(s: &str) -> Vec<u8> {
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let mut result = Vec::new();
+    for tok in &tokens {
+        if *tok == ".." {
+            /* Sentinel: push 0xFF 0xFE to mark "wildcard tail" */
+            result.push(0xFF);
+            result.push(0xFE);
+            break;
+        }
+        if let Ok(b) = u8::from_str_radix(tok, 16) {
+            result.push(b);
+        }
+    }
+    result
+}
+
+/* Check if `written` matches `pattern`. The pattern may end with the
+ * sentinel [0xFF, 0xFE] meaning "any remaining bytes". */
+#[cfg(feature = "dev-hooks")]
+fn pattern_matches(pattern: &[u8], written: &[u8]) -> bool {
+    /* Check for wildcard tail sentinel */
+    let has_wildcard = pattern.len() >= 2
+        && pattern[pattern.len() - 2] == 0xFF
+        && pattern[pattern.len() - 1] == 0xFE;
+
+    if has_wildcard {
+        let prefix = &pattern[..pattern.len() - 2];
+        if written.len() < prefix.len() {
+            return false;
+        }
+        written[..prefix.len()] == *prefix
+    } else {
+        written == pattern
+    }
+}
+
 /* Async wrapper around a `/dev/hidraw` file descriptor. */
 /*                                                       */
 /* All hardware I/O goes through this struct so that     */
 /* drivers never touch raw file handles directly.        */
 pub struct DeviceIo {
+    #[cfg(not(feature = "dev-hooks"))]
     file: tokio::fs::File,
+    #[cfg(not(feature = "dev-hooks"))]
     path: std::path::PathBuf,
+
+    #[cfg(feature = "dev-hooks")]
+    backend: IoBackend,
+
     /* Reports seen during `request()` that were valid HID++ but did not
      * match the pending command.  These are unsolicited hardware events
      * (e.g. profile-switch notifications) that the actor should forward
@@ -138,6 +285,17 @@ pub struct DeviceIo {
      * the buffer is full, preventing unbounded memory growth under
      * pathological device behavior. */
     pending_events: VecDeque<Vec<u8>>,
+}
+
+#[cfg(feature = "dev-hooks")]
+enum IoBackend {
+    Hidraw {
+        file: tokio::fs::File,
+        path: std::path::PathBuf,
+    },
+    Mock {
+        state: Arc<Mutex<MockState>>,
+    },
 }
 
 impl DeviceIo {
@@ -151,31 +309,111 @@ impl DeviceIo {
             .with_context(|| format!("Failed to open hidraw device {}", path.display()))?;
 
         Ok(Self {
+            #[cfg(not(feature = "dev-hooks"))]
             file,
+            #[cfg(not(feature = "dev-hooks"))]
             path: path.to_path_buf(),
+            #[cfg(feature = "dev-hooks")]
+            backend: IoBackend::Hidraw {
+                file,
+                path: path.to_path_buf(),
+            },
             pending_events: VecDeque::new(),
         })
     }
 
+    /* Create a DeviceIo backed by a mock I/O script (dev-hooks only).
+     *
+     * The returned `Arc<Mutex<MockState>>` is shared with the caller
+     * so that `GetMockIoLog` can inspect the write log after the
+     * driver has run. */
+    #[cfg(feature = "dev-hooks")]
+    pub fn from_mock(script_json: &str) -> Result<(Self, Arc<Mutex<MockState>>)> {
+        let spec: MockScriptSpec = serde_json::from_str(script_json)
+            .with_context(|| "Failed to parse mock I/O script JSON")?;
+        let state = Arc::new(Mutex::new(MockState::from_spec(spec)));
+        Ok((
+            Self {
+                backend: IoBackend::Mock {
+                    state: Arc::clone(&state),
+                },
+                pending_events: VecDeque::new(),
+            },
+            state,
+        ))
+    }
+
     /* Write a raw HID report to the device. */
     pub async fn write_report(&mut self, buf: &[u8]) -> Result<()> {
-        self.file
-            .write_all(buf)
-            .await
-            .with_context(|| format!("Write failed on {}", self.path.display()))?;
-        debug!("TX {} bytes: {:02x?}", buf.len(), buf);
-        Ok(())
+        #[cfg(not(feature = "dev-hooks"))]
+        {
+            self.file
+                .write_all(buf)
+                .await
+                .with_context(|| format!("Write failed on {}", self.path.display()))?;
+            debug!("TX {} bytes: {:02x?}", buf.len(), buf);
+            Ok(())
+        }
+        #[cfg(feature = "dev-hooks")]
+        {
+            match &mut self.backend {
+                IoBackend::Hidraw { file, path } => {
+                    file.write_all(buf)
+                        .await
+                        .with_context(|| format!("Write failed on {}", path.display()))?;
+                    debug!("TX {} bytes: {:02x?}", buf.len(), buf);
+                    Ok(())
+                }
+                IoBackend::Mock { state } => {
+                    let mut st = state.lock().unwrap();
+                    debug!("MOCK TX {} bytes: {:02x?}", buf.len(), buf);
+                    st.write_log.push(buf.to_vec());
+                    st.match_and_respond(buf);
+                    Ok(())
+                }
+            }
+        }
     }
 
     /* Read a single HID report from the device (blocks until data arrives). */
     pub async fn read_report(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let n = self
-            .file
-            .read(buf)
-            .await
-            .with_context(|| format!("Read failed on {}", self.path.display()))?;
-        debug!("RX {} bytes: {:02x?}", n, &buf[..n]);
-        Ok(n)
+        #[cfg(not(feature = "dev-hooks"))]
+        {
+            let n = self
+                .file
+                .read(buf)
+                .await
+                .with_context(|| format!("Read failed on {}", self.path.display()))?;
+            debug!("RX {} bytes: {:02x?}", n, &buf[..n]);
+            Ok(n)
+        }
+        #[cfg(feature = "dev-hooks")]
+        {
+            match &mut self.backend {
+                IoBackend::Hidraw { file, path } => {
+                    let n = file
+                        .read(buf)
+                        .await
+                        .with_context(|| format!("Read failed on {}", path.display()))?;
+                    debug!("RX {} bytes: {:02x?}", n, &buf[..n]);
+                    Ok(n)
+                }
+                IoBackend::Mock { state } => {
+                    let mut st = state.lock().unwrap();
+                    if let Some(response) = st.response_queue.pop_front() {
+                        let n = response.len().min(buf.len());
+                        buf[..n].copy_from_slice(&response[..n]);
+                        debug!("MOCK RX {} bytes: {:02x?}", n, &buf[..n]);
+                        Ok(n)
+                    } else {
+                        /* No response queued — simulate a read timeout so
+                         * that `request()` breaks out of its inner loop
+                         * instead of spinning indefinitely. */
+                        Err(anyhow::anyhow!("Mock: no response queued (simulated timeout)"))
+                    }
+                }
+            }
+        }
     }
 
     /* Get a HID feature report using the `HIDIOCGFEATURE` ioctl.  */
@@ -184,21 +422,53 @@ impl DeviceIo {
     /* kernel fills the remaining bytes with the report data and   */
     /* returns the total number of bytes written.                  */
     pub fn get_feature_report(&self, buf: &mut [u8]) -> Result<usize, DriverError> {
-        let fd = self.file.as_raw_fd();
+        #[cfg(not(feature = "dev-hooks"))]
+        {
+            let fd = self.file.as_raw_fd();
 
-        /* SAFETY: `fd` is a valid open file descriptor obtained    */
-        /* from `self.file` which is alive for the duration of this */
-        /* `&self` borrow. `as_raw_fd()` does not consume the File, */
-        /* so the descriptor cannot be closed between extraction    */
-        /* and the ioctl call. The nix macro encodes `buf.len()`    */
-        /* into the ioctl request number and passes `buf.as_mut_ptr()` */
-        /* as the data argument. The kernel fills exactly            */
-        /* `buf.len()` bytes from this fd.                          */
-        let n = unsafe { hidioc_gfeature(fd, buf) }
-            .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
+            /* SAFETY: `fd` is a valid open file descriptor obtained    */
+            /* from `self.file` which is alive for the duration of this */
+            /* `&self` borrow. `as_raw_fd()` does not consume the File, */
+            /* so the descriptor cannot be closed between extraction    */
+            /* and the ioctl call. The nix macro encodes `buf.len()`    */
+            /* into the ioctl request number and passes `buf.as_mut_ptr()` */
+            /* as the data argument. The kernel fills exactly            */
+            /* `buf.len()` bytes from this fd.                          */
+            let n = unsafe { hidioc_gfeature(fd, buf) }
+                .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
 
-        debug!("GET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
-        Ok(n)
+            debug!("GET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
+            Ok(n)
+        }
+        #[cfg(feature = "dev-hooks")]
+        {
+            match &self.backend {
+                IoBackend::Hidraw { file, .. } => {
+                    let fd = file.as_raw_fd();
+                    /* SAFETY: same fd-validity argument as the non-dev-hooks path. */
+                    let n = unsafe { hidioc_gfeature(fd, buf) }
+                        .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
+                    debug!("GET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
+                    Ok(n)
+                }
+                IoBackend::Mock { state } => {
+                    let st = state.lock().unwrap();
+                    let report_id = buf[0];
+                    if let Some(data) = st.feature_reports.get(&report_id) {
+                        let n = data.len().min(buf.len());
+                        buf[..n].copy_from_slice(&data[..n]);
+                        debug!("MOCK GET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
+                        Ok(n)
+                    } else {
+                        debug!("MOCK GET_FEATURE: no data for report ID {:#04x}", report_id);
+                        Err(DriverError::IoctlFailed(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("Mock: no feature report for ID {:#04x}", report_id),
+                        )))
+                    }
+                }
+            }
+        }
     }
 
     /* Set a HID feature report using the `HIDIOCSFEATURE` ioctl.  */
@@ -206,23 +476,50 @@ impl DeviceIo {
     /* `buf[0]` must contain the report ID. Returns the number of  */
     /* bytes accepted by the kernel.                               */
     pub fn set_feature_report(&self, buf: &[u8]) -> Result<usize, DriverError> {
-        let fd = self.file.as_raw_fd();
+        #[cfg(not(feature = "dev-hooks"))]
+        {
+            let fd = self.file.as_raw_fd();
 
-        /* The kernel's HIDIOCSFEATURE is defined with _IOC_READ|_IOC_WRITE   */
-        /* direction bits even though it only reads FROM the buffer.  The nix  */
-        /* `ioctl_readwrite_buf!` macro therefore requires `&mut [u8]`.  We    */
-        /* copy to a mutable temporary to satisfy this requirement without     */
-        /* exposing the caller to an unnecessary `&mut` constraint.            */
-        let mut tmp = buf.to_vec();
+            /* The kernel's HIDIOCSFEATURE is defined with _IOC_READ|_IOC_WRITE   */
+            /* direction bits even though it only reads FROM the buffer.  The nix  */
+            /* `ioctl_readwrite_buf!` macro therefore requires `&mut [u8]`.  We    */
+            /* copy to a mutable temporary to satisfy this requirement without     */
+            /* exposing the caller to an unnecessary `&mut` constraint.            */
+            let mut tmp = buf.to_vec();
 
-        /* SAFETY: Same fd-validity argument as `get_feature_report`.  The     */
-        /* kernel reads `tmp.len()` bytes from the buffer; it does not write   */
-        /* back into it despite the readwrite direction bits.                   */
-        let n = unsafe { hidioc_sfeature(fd, &mut tmp) }
-            .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
+            /* SAFETY: Same fd-validity argument as `get_feature_report`.  The     */
+            /* kernel reads `tmp.len()` bytes from the buffer; it does not write   */
+            /* back into it despite the readwrite direction bits.                   */
+            let n = unsafe { hidioc_sfeature(fd, &mut tmp) }
+                .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
 
-        debug!("SET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
-        Ok(n)
+            debug!("SET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
+            Ok(n)
+        }
+        #[cfg(feature = "dev-hooks")]
+        {
+            match &self.backend {
+                IoBackend::Hidraw { file, .. } => {
+                    let fd = file.as_raw_fd();
+                    let mut tmp = buf.to_vec();
+                    /* SAFETY: same fd-validity argument as the non-dev-hooks path. */
+                    let n = unsafe { hidioc_sfeature(fd, &mut tmp) }
+                        .map_err(|e| DriverError::IoctlFailed(e.into()))? as usize;
+                    debug!("SET_FEATURE {} bytes: {:02x?}", n, &buf[..n]);
+                    Ok(n)
+                }
+                IoBackend::Mock { state } => {
+                    let mut st = state.lock().unwrap();
+                    let report_id = buf[0];
+                    // Do not overwrite the mock feature report response;
+                    // drivers often write to a command report and expect a status response.
+                    // st.feature_reports.insert(report_id, buf.to_vec());
+                    st.write_log.push(buf.to_vec());
+                    debug!("MOCK SET_FEATURE {} bytes: {:02x?}", buf.len(), buf);
+                    Ok(buf.len())
+                }
+            }
+        }
     }
 
     /* Send a report and wait for a matching response.             */

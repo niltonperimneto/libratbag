@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, trace, warn};
 
-use crate::device::{Color, DeviceInfo, Dpi, LedMode, ProfileInfo, RgbColor};
+use crate::device::{Color, DeviceInfo, Dpi, LedMode, ProfileInfo};
 use crate::driver::DeviceIo;
 
 use super::hidpp::{

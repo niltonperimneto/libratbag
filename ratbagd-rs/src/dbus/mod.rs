@@ -23,6 +23,7 @@ use crate::device_database::{BusType, DeviceDb};
 use crate::driver;
 use crate::udev_monitor::DeviceAction;
 
+
 /// Fallback [`OwnedValue`] (`u32` zero) used when zvariant serialization fails.
 #[inline]
 pub(crate) fn fallback_owned_value() -> OwnedValue {
@@ -196,6 +197,7 @@ async fn remove_device(
 /// hotplug events from the udev monitor through the `device_rx` channel.
 pub async fn run_server(
     mut device_rx: mpsc::Receiver<DeviceAction>,
+    device_rx_tx: mpsc::Sender<DeviceAction>,
     device_db: DeviceDb,
 ) -> Result<()> {
     let manager = manager::RatbagManager::default();
@@ -228,6 +230,17 @@ pub async fn run_server(
 
     // Track actor handles so we can shut them down on removal.
     let mut actor_handles: HashMap<String, ActorHandle> = HashMap::new();
+
+    /* Shared mock I/O state map — the manager holds an Arc to the same
+     * map so GetMockIoLog can read write logs from the DBus thread. */
+    #[cfg(feature = "dev-hooks")]
+    let mock_states = {
+        let object_server = conn.object_server();
+        let iface_ref = object_server
+            .interface::<_, manager::RatbagManager>("/org/freedesktop/ratbag1")
+            .await?;
+        iface_ref.get().await.mock_states_handle()
+    };
 
     /* Track (bustype, vid, pid, parent_phys) tuples that already have a successfully-
      * probed hidraw node registered.  Multi-interface USB HID devices
@@ -318,54 +331,8 @@ pub async fn run_server(
                 // Wrap DeviceInfo in Arc<RwLock> so actor and DBus share state.
                 let shared_info = Arc::new(RwLock::new(device_info));
 
-                /* Time budget for opening the device, probing the protocol,
-                 * and loading the full profile state from hardware.  Wired
-                 * Logitech devices can be slow because the HID++ vendor
-                 * interface shares its hidraw node with mouse input reports;
-                 * every read may return noise that must be discarded before
-                 * the protocol response arrives.  120 seconds covers even
-                 * the slowest observed wired devices (e.g. G403 HERO). */
-                const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
-
-                // Try to create and spawn the hardware driver actor.
-                let actor_handle = match driver::create_driver(&entry.driver) {
-                    Some(drv) => {
-                        match tokio::time::timeout(
-                            PROBE_TIMEOUT,
-                            actor::spawn_device_actor(
-                                &devnode,
-                                drv,
-                                Arc::clone(&shared_info),
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(Ok(handle)) => {
-                                info!(
-                                    "Driver {} active for {}",
-                                    entry.driver, sysname
-                                );
-                                handle
-                            }
-                            Ok(Err(e)) => {
-                                warn!(
-                                    "Driver {} probe failed for {}: {e:#}",
-                                    entry.driver, sysname
-                                );
-                                continue;
-                            }
-                            Err(_) => {
-                                warn!(
-                                    "Driver {} probe timed out for {} after {}s — \
-                                     wrong hidraw interface?",
-                                    entry.driver,
-                                    sysname,
-                                    PROBE_TIMEOUT.as_secs()
-                                );
-                                continue;
-                            }
-                        }
-                    }
+                let drv = match driver::create_driver(&entry.driver) {
+                    Some(d) => d,
                     None => {
                         warn!(
                             "No driver implementation for '{}' (device {})",
@@ -375,9 +342,84 @@ pub async fn run_server(
                     }
                 };
 
-                /* Probe + profile load succeeded — record this VID:PID so
-                 * we skip any remaining hidraw nodes for the same physical
-                 * device (they would be the wrong USB interface). */
+                /* Spawn the slow probe + load_profiles work onto a
+                 * background task so the event loop stays responsive
+                 * for test device injections and hotplug events. */
+                let bg_info = Arc::clone(&shared_info);
+                let bg_devnode = devnode.clone();
+                let bg_sysname = sysname.clone();
+                let bg_device_path = device_path.clone();
+                let bg_entry_name = entry.name.clone();
+                let bg_entry_driver = entry.driver.clone();
+                let bg_phys_key = phys_key.clone();
+                let bg_tx = device_rx_tx.clone();
+
+                tokio::spawn(async move {
+                    /* Time budget for opening the device, probing the protocol,
+                     * and loading the full profile state from hardware.  Wired
+                     * Logitech devices can be slow because the HID++ vendor
+                     * interface shares its hidraw node with mouse input reports;
+                     * every read may return noise that must be discarded before
+                     * the protocol response arrives.  120 seconds covers even
+                     * the slowest observed wired devices (e.g. G403 HERO). */
+                    const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+                    let handle = match tokio::time::timeout(
+                        PROBE_TIMEOUT,
+                        actor::spawn_device_actor(
+                            &bg_devnode,
+                            drv,
+                            Arc::clone(&bg_info),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(h)) => {
+                            info!("Driver {} active for {}", bg_entry_driver, bg_sysname);
+                            h
+                        }
+                        Ok(Err(e)) => {
+                            warn!(
+                                "Driver {} probe failed for {}: {e:#}",
+                                bg_entry_driver, bg_sysname
+                            );
+                            return;
+                        }
+                        Err(_) => {
+                            warn!(
+                                "Driver {} probe timed out for {} after {}s — \
+                                 wrong hidraw interface?",
+                                bg_entry_driver, bg_sysname,
+                                PROBE_TIMEOUT.as_secs()
+                            );
+                            return;
+                        }
+                    };
+
+                    /* Notify the event loop that probing succeeded. */
+                    let _ = bg_tx.send(DeviceAction::ProbeComplete {
+                        sysname: bg_sysname,
+                        device_path: bg_device_path,
+                        entry_name: bg_entry_name,
+                        phys_key: bg_phys_key,
+                        shared_info: bg_info,
+                        actor_handle: handle,
+                    }).await;
+                });
+            }
+
+            /* A background probe task completed successfully.
+             * Register the device on D-Bus and update the manager. */
+            DeviceAction::ProbeComplete {
+                sysname,
+                device_path,
+                entry_name,
+                phys_key,
+                shared_info,
+                actor_handle,
+            } => {
+                /* Record this VID:PID so we skip any remaining hidraw
+                 * nodes for the same physical device. */
                 probed_devices.insert(phys_key);
 
                 let object_paths = register_device_on_dbus(
@@ -407,7 +449,7 @@ pub async fn run_server(
 
                 info!(
                     "Device {} registered at {} ({} child objects)",
-                    entry.name,
+                    entry_name,
                     device_path,
                     registered_devices[&sysname].len() - 1
                 );
@@ -464,6 +506,7 @@ pub async fn run_server(
 
             #[cfg(feature = "dev-hooks")]
             DeviceAction::RemoveTest { sysname } => {
+                mock_states.lock().unwrap().remove(&sysname);
                 remove_device(
                     &conn,
                     &sysname,
@@ -471,6 +514,98 @@ pub async fn run_server(
                     &mut actor_handles,
                 )
                 .await?;
+            }
+
+            /* Inject a test device that runs through the real driver's
+             * probe → load_profiles path using a mock I/O backend, then
+             * spawns a live actor so that Commit from DBus calls
+             * driver.commit() against the mock. */
+            #[cfg(feature = "dev-hooks")]
+            DeviceAction::InjectTestWithDriver {
+                sysname,
+                driver_name,
+                mut device_info,
+                io_script_json,
+            } => {
+                let device_path = format!(
+                    "/org/freedesktop/ratbag1/device/{}",
+                    sysname.replace('-', "_")
+                );
+
+                info!(
+                    "InjectTestWithDriver: '{}' driver={} at {}",
+                    sysname, driver_name, device_path
+                );
+
+                /* Create the mock I/O backend from the JSON script. */
+                let (mut io, mock_state) = match driver::DeviceIo::from_mock(&io_script_json) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        warn!("InjectTestWithDriver: mock I/O parse error: {e:#}");
+                        continue;
+                    }
+                };
+
+                /* Instantiate the driver. */
+                let mut drv = match driver::create_driver(&driver_name) {
+                    Some(d) => d,
+                    None => {
+                        warn!("InjectTestWithDriver: unknown driver '{driver_name}'");
+                        continue;
+                    }
+                };
+
+                /* Run the driver's probe and load_profiles against mock I/O. */
+                if let Err(e) = drv.probe(&mut io).await {
+                    warn!("InjectTestWithDriver: probe failed for {sysname}: {e:#}");
+                    continue;
+                }
+                if let Err(e) = drv.load_profiles(&mut io, &mut device_info).await {
+                    warn!("InjectTestWithDriver: load_profiles failed for {sysname}: {e:#}");
+                    continue;
+                }
+
+                let shared_info = Arc::new(RwLock::new(device_info));
+
+                /* Spawn a live actor so that DBus Commit calls drive
+                 * through driver.commit() against the mock backend. */
+                let actor_handle = actor::spawn_device_actor_with_io(
+                    drv,
+                    io,
+                    Arc::clone(&shared_info),
+                );
+
+                mock_states.lock().unwrap().insert(sysname.clone(), mock_state);
+
+                let object_paths = register_device_on_dbus(
+                    &conn,
+                    &device_path,
+                    Arc::clone(&shared_info),
+                    Some(actor_handle.clone()),
+                )
+                .await;
+
+                let object_server = conn.object_server();
+                let iface_ref = object_server
+                    .interface::<_, manager::RatbagManager>(
+                        "/org/freedesktop/ratbag1",
+                    )
+                    .await?;
+                iface_ref.get_mut().await.add_device(device_path.clone());
+                iface_ref
+                    .get()
+                    .await
+                    .devices_changed(iface_ref.signal_emitter())
+                    .await?;
+
+                actor_handles.insert(sysname.clone(), actor_handle);
+                registered_devices.insert(sysname.clone(), object_paths);
+
+                info!(
+                    "InjectTestWithDriver: '{}' registered ({} objects)",
+                    sysname,
+                    registered_devices[&sysname].len()
+                );
             }
         }
     }

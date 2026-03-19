@@ -120,7 +120,7 @@ pub enum ActorMessage {
 }
 
 /* Handle used by DBus objects to send commands to the device actor. */
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ActorHandle {
     tx: mpsc::Sender<ActorMessage>,
 }
@@ -221,6 +221,33 @@ impl DeviceActor {
 
         debug!("Device actor loop exited");
     }
+}
+
+/* Spawn a device actor from an already-constructed DeviceIo (dev-hooks mock path).
+ *
+ * Unlike `spawn_device_actor`, this does NOT open a hidraw node or run
+ * probe/load_profiles — the caller has already done those steps with
+ * the mock I/O backend. It just creates the channel + actor + task. */
+#[cfg(feature = "dev-hooks")]
+pub fn spawn_device_actor_with_io(
+    driver: Box<dyn DeviceDriver>,
+    io: DeviceIo,
+    info: Arc<RwLock<DeviceInfo>>,
+) -> ActorHandle {
+    let (tx, rx) = mpsc::channel(16);
+
+    let actor = DeviceActor {
+        driver,
+        io,
+        info,
+        rx,
+    };
+
+    tokio::spawn(async move {
+        actor.run().await;
+    });
+
+    ActorHandle { tx }
 }
 
 /* Spawn a device actor for the given hardware device.

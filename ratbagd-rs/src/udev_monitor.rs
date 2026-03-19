@@ -40,6 +40,18 @@ pub enum DeviceAction {
     Remove {
         sysname: String,
     },
+    /* Result of a background probe task.  Sent back to the event loop
+     * by the `tokio::spawn`-ed probe future so that D-Bus registration
+     * happens on the main loop without blocking it during the slow
+     * probe + load_profiles I/O. */
+    ProbeComplete {
+        sysname: String,
+        device_path: String,
+        entry_name: String,
+        phys_key: (crate::device_database::BusType, u16, u16, String),
+        shared_info: std::sync::Arc<tokio::sync::RwLock<crate::device::DeviceInfo>>,
+        actor_handle: crate::actor::ActorHandle,
+    },
     /* Inject a synthetic test device directly into the DBus layer.
      * Only constructed when the `dev-hooks` feature is enabled. */
     #[cfg(feature = "dev-hooks")]
@@ -53,15 +65,29 @@ pub enum DeviceAction {
     RemoveTest {
         sysname: String,
     },
+    /* Inject a synthetic test device that runs through the real driver's
+     * probe/load_profiles/commit path using a mock I/O backend.
+     * Only constructed when the `dev-hooks` feature is enabled. */
+    #[cfg(feature = "dev-hooks")]
+    InjectTestWithDriver {
+        sysname: String,
+        driver_name: String,
+        device_info: crate::device::DeviceInfo,
+        io_script_json: String,
+    },
 }
 
 impl DeviceAction {
     /* Extract sysname from any variant for logging. */
     fn sysname(&self) -> &str {
         match self {
-            Self::Add { sysname, .. } | Self::Remove { sysname } => sysname,
+            Self::Add { sysname, .. }
+            | Self::Remove { sysname }
+            | Self::ProbeComplete { sysname, .. } => sysname,
             #[cfg(feature = "dev-hooks")]
-            Self::InjectTest { sysname, .. } | Self::RemoveTest { sysname } => sysname,
+            Self::InjectTest { sysname, .. }
+            | Self::RemoveTest { sysname }
+            | Self::InjectTestWithDriver { sysname, .. } => sysname,
         }
     }
 }

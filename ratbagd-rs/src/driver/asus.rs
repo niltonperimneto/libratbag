@@ -98,7 +98,7 @@ enum AsusButtonKind {
     None,
     Button(u32),   /* ActionType::Button, value = ratbag button index (1-based) */
     Special(u32),  /* ActionType::Special, value = special action constant below */
-    Joystick,      /* joystick axis — also treated as Special in DBus */
+    Joystick,      /* joystick direction — mapped to ActionType::None (matches C) */
 }
 
 struct AsusButtonEntry {
@@ -943,10 +943,9 @@ impl AsusDriver {
                                 btn.mapping_value = n;
                             }
                             AsusButtonKind::Joystick => {
-                                /* Joystick axes reported as Special with value 0
-                                 * until a more precise action can be assigned. */
-                                btn.action_type  = ActionType::Special;
-                                btn.mapping_value = 0;
+                                /* Pure joystick direction buttons (0xd0..0xd3) are not
+                                 * directly actionable; the C code reports them as NONE. */
+                                btn.action_type = ActionType::None;
                             }
                             AsusButtonKind::None => {
                                 btn.action_type = ActionType::None;
@@ -1292,14 +1291,15 @@ impl DeviceDriver for AsusDriver {
         /* Initialise all driver-side state from the device-file config. */
         self.init_from_config(&info.driver_config);
 
-        /* Fill static per-profile capability lists that don't need hardware I/O. */
-        let led_modes_vec: Vec<LedMode> = self.led_modes.to_vec();
+        /* Fill static per-profile capability lists that don't need hardware I/O.
+         * LED capabilities match the C driver's asus_setup_led(): Solid, Cycle, Breathing.
+         * The internal self.led_modes array is for hardware mode-index translation only. */
         for profile in &mut info.profiles {
             profile.report_rates = ASUS_POLLING_RATES.to_vec();
             profile.debounces    = ASUS_DEBOUNCE_TIMES.to_vec();
             for led in &mut profile.leds {
                 led.color_depth = 3; /* 8-8-8 RGB */
-                led.modes = led_modes_vec.clone();
+                led.modes = vec![LedMode::Solid, LedMode::Cycle, LedMode::Breathing];
             }
         }
 

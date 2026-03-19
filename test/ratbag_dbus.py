@@ -90,6 +90,29 @@ class RatbagDBusClient:
         """Remove the currently injected test device (requires dev-hooks)."""
         self._call_method(MANAGER_PATH, MANAGER_IFACE, "ResetTestDevice")
 
+    def load_test_device_with_driver(
+        self, driver_name: str, device_config_json: str, io_script_json: str
+    ) -> str:
+        """Inject a test device that runs through a real driver with mock I/O."""
+        return str(
+            self._call_method(
+                MANAGER_PATH,
+                MANAGER_IFACE,
+                "LoadTestDeviceWithDriver",
+                driver_name,
+                device_config_json,
+                io_script_json,
+            )
+        )
+
+    def get_mock_io_log(self, sysname: str) -> str:
+        """Return the mock I/O write log as a JSON string."""
+        return str(
+            self._call_method(
+                MANAGER_PATH, MANAGER_IFACE, "GetMockIoLog", sysname
+            )
+        )
+
     def has_dev_hooks(self) -> bool:
         """Return True if the daemon exposes LoadTestDevice (dev-hooks build).
 

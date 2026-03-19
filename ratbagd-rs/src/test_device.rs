@@ -24,6 +24,29 @@ pub mod spec {
     pub struct TestDeviceSpec {
         #[serde(default)]
         pub profiles: Vec<TestProfileSpec>,
+        /* Driver config fields — mirror DriverConfig so that test JSON
+         * can set protocol version, button/LED counts, quirks, etc. */
+        pub device_version: Option<u32>,
+        pub buttons: Option<u32>,
+        pub leds: Option<u32>,
+        #[serde(default)]
+        pub quirks: Vec<String>,
+        pub dpi_range: Option<TestDpiRange>,
+        #[serde(default)]
+        pub dpi_list: Vec<u32>,
+        pub macro_length: Option<u32>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct TestDpiRange {
+        pub min: u32,
+        pub max: u32,
+        #[serde(default = "default_dpi_step")]
+        pub step: u32,
+    }
+
+    fn default_dpi_step() -> u32 {
+        100
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -288,6 +311,23 @@ pub mod spec {
             })
             .collect();
 
+        let driver_config = DriverConfig {
+            device_version: spec.device_version,
+            buttons: spec.buttons,
+            leds: spec.leds,
+            quirks: spec.quirks,
+            dpi_range: spec.dpi_range.map(|r| {
+                crate::device_database::DpiRange {
+                    min: r.min,
+                    max: r.max,
+                    step: r.step,
+                }
+            }),
+            dpi_list: spec.dpi_list,
+            macro_length: spec.macro_length,
+            ..DriverConfig::default()
+        };
+
         DeviceInfo {
             sysname: sysname.to_string(),
             name: format!("Test Device ({})", sysname),
@@ -295,7 +335,7 @@ pub mod spec {
             firmware_version: String::new(),
             device_type: 2, /* mouse */
             profiles,
-            driver_config: DriverConfig::default(),
+            driver_config,
         }
     }
 
