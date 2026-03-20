@@ -9,7 +9,6 @@ builddir/
 Thumbs.db
 ratbagctl-rs/target/*
 .agents/
-.github/
 test/
 *.c
 *.h
@@ -18,3 +17,5 @@ test/
 node_modules/
 twister
 
+ratbagctl-rs/ratbagctl
+twister
