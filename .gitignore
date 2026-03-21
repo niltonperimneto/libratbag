@@ -15,3 +15,5 @@ test/
 *.h
 .claude/skills/linux-driver/SKILL.md
 .claude/rules/rust-linux-devel.instructions.md
+ratbagctl-rs/ratbagctl
+ratbagd-rs/ratbagd
