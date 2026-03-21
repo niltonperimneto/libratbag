@@ -16,6 +16,5 @@ test/
 .claude/rules/rust-linux-devel.instructions.md
 node_modules/
 twister
-
 ratbagctl-rs/ratbagctl
-twister
+ratbagd-rs/ratbagd
