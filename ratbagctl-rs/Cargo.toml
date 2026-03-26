@@ -2,7 +2,7 @@
 name = "ratbagctl-rs"
 version = "1.0.0"
 authors = ["Nilton Perim Neto <niltonperimneto@gmail.com>"]
-edition = "2021"
+edition = "2024"
 description = "Command-line tool to configure gaming mice via the ratbagd DBus daemon"
 license = "GPL-3.0-or-later"
 

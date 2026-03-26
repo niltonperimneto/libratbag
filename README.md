@@ -23,12 +23,13 @@ libratbag supports devices from Asus, Etekcity, GSkill, Logitech (HID++ 1.0
 and 2.0, G300, G600), MarsGaming, OpenInput, Roccat (including Kone Pure /
 Kone EMP variants), Sinowealth (including Nubwo), and Steelseries.
 
-See [the device files](https://github.com/libratbag/libratbag/tree/master/data/devices)
+See [the device files](https://github.com/niltonperimneto/libratbag-rs/tree/master/data/devices)
 for a complete list of supported devices.
 
 Users interact through a GUI like
-[Piper](https://github.com/libratbag/piper/) or the `ratbagctl` command-line
-tool (see below).
+[Twister](twister/) (a modern Tauri + Svelte desktop app included in this
+repository) or [Piper](https://github.com/libratbag/piper/), or the
+`ratbagctl` command-line tool (see below).
 
 What Changed in the Rust Rewrite
 ---------------------------------
@@ -67,17 +68,17 @@ The core `ratbagd` daemon has been rewritten from C to Rust. Key changes:
 - The `.device` file database in `data/devices/`.
 - systemd and DBus service activation configuration.
 
-Installing libratbag from system packages
------------------------------------------
+Installing libratbag-rs from system packages
+---------------------------------------------
 
-libratbag is packaged for some distributions, you can use your system's
-package manager to install it. See [the
-wiki](https://github.com/niltonperimneto/libratbag/wiki/Installation) for details.
+libratbag-rs is not yet packaged for distributions. See the
+[Compiling](#compiling-libratbag) section below to build from source.
 
 Build Requirements
 ------------------
 
-- **Rust toolchain** — a stable Rust compiler (edition 2021) and Cargo.
+- **Rust toolchain** — a stable Rust compiler (Rust 1.85+; edition 2024 for
+  `ratbagd-rs`, edition 2021 for `ratbagctl-rs`) and Cargo.
   Install via [rustup](https://rustup.rs/) or your distribution's package
   manager.
 - **Meson** (>= 0.50) and **Ninja**.
@@ -100,8 +101,8 @@ turn uses Ninja to invoke the compilers. Meson drives the Rust build
 automatically via Cargo. Run the following commands to clone libratbag and
 build everything:
 
-    git clone https://github.com/libratbag/libratbag.git
-    cd libratbag
+    git clone https://github.com/niltonperimneto/libratbag-rs.git
+    cd libratbag-rs
     meson setup builddir --prefix=/usr
     meson compile -C builddir
     sudo meson install -C builddir
@@ -267,6 +268,32 @@ to the running `ratbagd` daemon over DBus.
 `<device>` can be a zero-based index from `ratbagctl list` or a sysname
 substring. All write commands automatically commit changes to hardware.
 
+Twister (Desktop GUI)
+---------------------
+
+Twister is a modern, desktop-agnostic graphical frontend for configuring
+gaming mice. It is built with Tauri 2 and Svelte 5 and is included in this
+repository under `twister/`.
+
+Twister communicates with `ratbagd` over the same `org.freedesktop.ratbag1`
+DBus interface, so it works as a drop-in replacement for Piper on any Linux
+desktop environment.
+
+**Status:** Early alpha — core features (DPI, buttons, LEDs, profiles) work.
+
+See [twister/README.md](twister/README.md) for build instructions,
+screenshots, and detailed documentation.
+
+Testing
+-------
+
+The `test/` directory contains a Python integration test suite that exercises
+the full `org.freedesktop.ratbag1` DBus API against the Rust daemon built
+with the `dev-hooks` feature. Tests use `pytest` and cover the Manager,
+Device, Profile, Resolution, Button, and LED interfaces.
+
+See [test/README.md](test/README.md) for prerequisites and usage.
+
 The DBus Interface
 -------------------
 
@@ -290,17 +317,19 @@ Architecture
 
 ### High-level data flow
 
-    +-------+    +------+    +-------------------+
-    | Piper | -> | DBus | -> | ratbagd-rs (Rust) | -> /dev/hidraw*
-    +-------+    +------+    +-------------------+
-                                    |
-                             +------+------+
-                             | Device Actor | (one per mouse, owns DeviceIo)
-                             +------+------+
-                                    |
-                             +------+------+
-                             |   Driver    | (HID++, Roccat, Steelseries, …)
-                             +-------------+
+    +---------+
+    | Twister |--+
+    +---------+  |   +------+    +-------------------+
+                 +-> | DBus | -> | ratbagd-rs (Rust) | -> /dev/hidraw*
+    +---------+  |   +------+    +-------------------+
+    |  Piper  |--+                      |
+    +---------+               +------+------+
+                              | Device Actor | (one per mouse, owns DeviceIo)
+                              +------+------+
+                                     |
+                              +------+------+
+                              |   Driver    | (HID++, Roccat, Steelseries, …)
+                              +-------------+
 
 ### Internal Rust architecture
 
@@ -324,14 +353,14 @@ Adding Devices to libratbag
 ---------------------------
 
 libratbag relies on a device database to match a device with its driver.
-See the [data/devices/](https://github.com/libratbag/libratbag/tree/master/data/devices)
+See the [data/devices/](https://github.com/niltonperimneto/libratbag-rs/tree/master/data/devices)
 directory for the set of known devices. These files are usually installed
 into `$prefix/$datadir` (e.g. `/usr/share/libratbag/`).
 
 Adding a new device can be as simple as adding a new `.device` file. This is
 the case for many devices with a shared protocol (e.g. Logitech's HID++).
 See the
-[data/devices/device.example](https://github.com/libratbag/libratbag/tree/master/data/devices/device.example)
+[data/devices/device.example](https://github.com/niltonperimneto/libratbag-rs/tree/master/data/devices/device.example)
 file for guidance on what information must be set. Look for existing devices
 from the same vendor as guidance too.
 
@@ -342,25 +371,25 @@ protocol. Good luck :)
 Source
 ------
 
-    git clone https://github.com/niltonperimneto/libratbag.git
+    git clone https://github.com/niltonperimneto/libratbag-rs.git
 
 Bugs
 ----
 
-Bugs can be reported in [our issue tracker](https://github.com/niltonperimneto/libratbag/issues)
+Bugs can be reported in [our issue tracker](https://github.com/niltonperimneto/libratbag-rs/issues)
 
-Mailing list
-------------
+Discussions
+-----------
 
-libratbag discussions happen on the [input-tools mailing
-list](http://lists.freedesktop.org/archives/input-tools/) hosted on
-freedesktop.org
+For questions, feature requests, or general discussion, please open an
+[issue](https://github.com/niltonperimneto/libratbag-rs/issues) on GitHub.
 
 Device-specific notes
 ---------------------
 
-A number of device-specific notes and observations can be found in our
-wiki: https://github.com/niltonperimneto/libratbag/wiki/Devices
+A number of device-specific notes and observations can be found in the
+upstream project wiki:
+https://github.com/libratbag/libratbag/wiki/Devices
 
 License
 -------
@@ -369,6 +398,10 @@ This project uses a **dual-license** structure:
 
 - **ratbagd-rs** (the Rust daemon in `ratbagd-rs/`) is licensed under the
   **GNU General Public License v3.0 (GPLv3)**.
+- **ratbagctl-rs** (the CLI tool in `ratbagctl-rs/`) is licensed under the
+  **GNU General Public License v3.0 or later (GPL-3.0-or-later)**.
+- **Twister** (the desktop GUI in `twister/`) is licensed under the
+  **GNU General Public License v3.0 or later (GPL-3.0-or-later)**.
 - **Supporting assets** (service templates, device data, documentation, and
   other non-daemon content) remain licensed under the **MIT/Expat** license.
 

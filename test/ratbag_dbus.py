@@ -86,6 +86,32 @@ class RatbagDBusClient:
         """Inject a synthetic test device (requires dev-hooks)."""
         self._call_method(MANAGER_PATH, MANAGER_IFACE, "LoadTestDevice", json_str)
 
+    def load_test_device_with_driver(
+        self, driver_name: str, config_json: str, io_script_json: str
+    ) -> str:
+        """Inject a driver-backed test device (requires dev-hooks).
+
+        Returns the sysname of the created device.
+        """
+        return str(
+            self._call_method(
+                MANAGER_PATH,
+                MANAGER_IFACE,
+                "LoadTestDeviceWithDriver",
+                driver_name,
+                config_json,
+                io_script_json,
+            )
+        )
+
+    def get_mock_io_log(self, sysname: str) -> str:
+        """Return the mock I/O write log as a JSON string."""
+        return str(
+            self._call_method(
+                MANAGER_PATH, MANAGER_IFACE, "GetMockIoLog", sysname
+            )
+        )
+
     def reset_test_device(self):
         """Remove the currently injected test device (requires dev-hooks)."""
         self._call_method(MANAGER_PATH, MANAGER_IFACE, "ResetTestDevice")
