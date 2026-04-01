@@ -305,10 +305,7 @@ impl DeviceDriver for SteelseriesDriver {
 
 /* Map a button index to its default action, mirroring the C driver's
  * button_defaults_for_layout() function.  Returns (ActionType, mapping_value). */
-fn button_defaults_for_layout(
-    btn_id: u32,
-    button_count: u32,
-) -> (crate::device::ActionType, u32) {
+fn button_defaults_for_layout(btn_id: u32, button_count: u32) -> (crate::device::ActionType, u32) {
     /* Index of the button that should get the resolution-cycle-up special */
     let special_idx = if button_count <= 6 {
         5
@@ -321,7 +318,10 @@ fn button_defaults_for_layout(
     if btn_id == special_idx {
         /* Special: resolution cycle up.  mapping_value encodes
          * RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_CYCLE_UP. */
-        (crate::device::ActionType::Special, crate::device::special_action::RESOLUTION_CYCLE_UP)
+        (
+            crate::device::ActionType::Special,
+            crate::device::special_action::RESOLUTION_CYCLE_UP,
+        )
     } else if btn_id < 8 {
         /* Regular mouse button (1-indexed for DBus compatibility). */
         (crate::device::ActionType::Button, btn_id + 1)
@@ -366,11 +366,7 @@ impl SteelseriesDriver {
                  * enumerated in reverse order in the C driver).  With DPI
                  * range: compute (dpi / step - 1). */
                 let scaled: u8 = if !res.dpi_list.is_empty() {
-                    let pos = res
-                        .dpi_list
-                        .iter()
-                        .position(|&d| d == dpi_val)
-                        .unwrap_or(0);
+                    let pos = res.dpi_list.iter().position(|&d| d == dpi_val).unwrap_or(0);
                     (res.dpi_list.len() - pos) as u8
                 } else {
                     (dpi_val / step).saturating_sub(1) as u8
@@ -543,7 +539,9 @@ impl SteelseriesDriver {
                 crate::device::ActionType::Special => {
                     use crate::device::special_action;
                     match button.mapping_value {
-                        special_action::RESOLUTION_CYCLE_UP => buf[idx] = STEELSERIES_BUTTON_RES_CYCLE,
+                        special_action::RESOLUTION_CYCLE_UP => {
+                            buf[idx] = STEELSERIES_BUTTON_RES_CYCLE
+                        }
                         special_action::WHEEL_UP => buf[idx] = STEELSERIES_BUTTON_WHEEL_UP,
                         special_action::WHEEL_DOWN => buf[idx] = STEELSERIES_BUTTON_WHEEL_DOWN,
                         _ => buf[idx] = STEELSERIES_BUTTON_OFF,
@@ -672,11 +670,7 @@ impl SteelseriesDriver {
         /* Effect report */
         let mut effect_buf = [0u8; STEELSERIES_REPORT_SIZE_SHORT];
         effect_buf[1] = STEELSERIES_ID_LED_EFFECT_SHORT;
-        effect_buf[2] = if rival100 {
-            0x00
-        } else {
-            led.index as u8 + 1
-        };
+        effect_buf[2] = if rival100 { 0x00 } else { led.index as u8 + 1 };
         effect_buf[3] = effect;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         io.write_report(&effect_buf).await?;
@@ -718,11 +712,7 @@ impl SteelseriesDriver {
     /* write_led_v2 – cycle-buffer matching C construct_cycle_buffer       */
     /* ------------------------------------------------------------------ */
 
-    async fn write_led_v2(
-        &self,
-        io: &mut DeviceIo,
-        led: &crate::device::LedInfo,
-    ) -> Result<()> {
+    async fn write_led_v2(&self, io: &mut DeviceIo, led: &crate::device::LedInfo) -> Result<()> {
         /* V2 cycle spec (matches C steelseries_led_cycle_spec for V2):
          *   cmd_val  (parameters[0])      → buf index 1
          *   led_id   (parameters[2])      → buf index 3
@@ -758,11 +748,7 @@ impl SteelseriesDriver {
     /* write_led_v3 – cycle-buffer matching C construct_cycle_buffer       */
     /* ------------------------------------------------------------------ */
 
-    async fn write_led_v3(
-        &self,
-        io: &mut DeviceIo,
-        led: &crate::device::LedInfo,
-    ) -> Result<()> {
+    async fn write_led_v3(&self, io: &mut DeviceIo, led: &crate::device::LedInfo) -> Result<()> {
         /* V3 cycle spec (matches C steelseries_led_cycle_spec for V3):
          *   cmd_val  (parameters[0])      → buf index 0  (feature report number)
          *   led_id   (parameters[2])      → buf index 2
