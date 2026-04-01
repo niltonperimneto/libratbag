@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -132,15 +133,27 @@ impl DeviceActor {
     }
 }
 
+/* Maximum time allowed for probing a device and loading its profiles.
+ *
+ * The kernel's HID request timeout is 5 seconds (via hid_hw_request),
+ * but a full probe can involve multiple round-trips: version ping,
+ * feature discovery (one RTT per feature page), onboard-mode switch,
+ * root directory sector read, and per-profile sector reads.  A complex
+ * device like the G502 with 8 feature pages and 5 onboard profiles
+ * completes in roughly 2 seconds on a healthy USB bus; 10 seconds
+ * provides ample headroom for slow wireless receivers while still
+ * preventing an indefinite hang from blocking the event loop. */
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /* Spawn a device actor for the given hardware device.
  *
  * This function:
  * 1. Opens the `/dev/hidraw` device node.
- * 2. Probes the device with the protocol driver.
+ * 2. Probes the device with the protocol driver (with a timeout).
  * 3. Reads the full device state (profiles, DPIs, LEDs).
  * 4. Spawns the actor task and returns a handle for DBus objects.
  *
- * Returns `None` if probing or profile loading fails (unsupported device). */
+ * Returns `Err` if probing or profile loading fails or times out. */
 pub async fn spawn_device_actor(
     devnode: &Path,
     mut driver: Box<dyn DeviceDriver>,
@@ -150,26 +163,44 @@ pub async fn spawn_device_actor(
         .await
         .with_context(|| format!("Opening {}", devnode.display()))?;
 
-    /* Probe: confirm the device speaks this protocol */
-    driver
-        .probe(&mut io)
-        .await
-        .with_context(|| format!("Probing {} with {}", devnode.display(), driver.name()))?;
+    /* Probe and load profiles under a single timeout.  If the device
+     * hangs (firmware bug, USB glitch, receiver in bad state) we bail
+     * out rather than blocking the event loop indefinitely. */
+    let driver_name = driver.name().to_string();
+    let devnode_display = devnode.display().to_string();
 
-    /* Load the full device state from hardware */
-    {
-        let mut device_info = info.write().await;
+    tokio::time::timeout(PROBE_TIMEOUT, async {
+        /* Probe: confirm the device speaks this protocol */
         driver
-            .load_profiles(&mut io, &mut device_info)
+            .probe(&mut io)
             .await
-            .with_context(|| {
-                format!(
-                    "Loading profiles from {} with {}",
-                    devnode.display(),
-                    driver.name()
-                )
-            })?;
-    }
+            .with_context(|| format!("Probing {} with {}", devnode_display, driver_name))?;
+
+        /* Load the full device state from hardware */
+        {
+            let mut device_info = info.write().await;
+            driver
+                .load_profiles(&mut io, &mut device_info)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Loading profiles from {} with {}",
+                        devnode_display, driver_name
+                    )
+                })?;
+        }
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Probe timed out after {}s for {} with {}",
+            PROBE_TIMEOUT.as_secs(),
+            devnode.display(),
+            driver.name()
+        )
+    })??;
 
     /* Create the message channel and spawn the actor */
     let (tx, rx) = mpsc::channel(16);

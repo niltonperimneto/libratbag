@@ -26,6 +26,12 @@ pub enum DeviceAction {
         bustype: u16,
         vid: u16,
         pid: u16,
+        /* USB topology path from the HID_PHYS property with the
+         * `/inputN` interface suffix stripped.  Two hidraw nodes of
+         * the same physical device share this prefix; two separate
+         * mice on different USB ports do not.  Used for deduplication
+         * so that a second identical mouse is not silently dropped. */
+        phys_path: String,
     },
     Remove {
         sysname: String,
@@ -201,6 +207,20 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
 
     let (bustype, vid, pid) = parse_hid_id(&hid_parent)?;
 
+    /* Extract HID_PHYS and strip the /inputN suffix to get the USB
+     * topology path that is shared by all hidraw nodes of the same
+     * physical device (e.g. "usb-0000:08:00.4-1/input0" → "usb-0000:08:00.4-1"). */
+    let phys_path = hid_parent
+        .property_value("HID_PHYS")
+        .map(|v| {
+            let s = v.to_string_lossy();
+            match s.rfind("/input") {
+                Some(pos) => s[..pos].to_string(),
+                None => s.to_string(),
+            }
+        })
+        .unwrap_or_default();
+
     Some(DeviceAction::Add {
         sysname,
         devnode,
@@ -208,6 +228,7 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         bustype,
         vid,
         pid,
+        phys_path,
     })
 }
 
