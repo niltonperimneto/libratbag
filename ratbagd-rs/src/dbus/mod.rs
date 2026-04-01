@@ -7,7 +7,7 @@ pub mod manager;
 pub mod profile;
 pub mod resolution;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -28,22 +28,34 @@ pub(crate) fn fallback_owned_value() -> OwnedValue {
     OwnedValue::from(0u32)
 }
 
-/// Register a new device and its children (profiles, buttons, etc) onto the DBus bus.
-///
-/// Returns a list of all object paths that were registered.
-/// Child objects share the same `Arc<RwLock<DeviceInfo>>` so property
-/// mutations propagate to the device-level `commit()` path.
+/* D-Bus interface tag stored alongside each object path so that teardown
+ * removes only the correct interface type in O(n) rather than blindly
+ * attempting all five types per path. */
+#[derive(Debug, Clone, Copy)]
+enum IfaceKind {
+    Device,
+    Profile,
+    Resolution,
+    Button,
+    Led,
+}
+
+/* Register a new device and its children (profiles, buttons, etc) onto the
+ * D-Bus bus.
+ *
+ * Returns a tagged list of all object paths that were registered.  Child
+ * objects share the same `Arc<RwLock<DeviceInfo>>` so property mutations
+ * propagate to the device-level `commit()` path. */
 async fn register_device_on_dbus(
     conn: &zbus::Connection,
     device_path: &str,
     shared_info: Arc<RwLock<DeviceInfo>>,
     actor_handle: Option<ActorHandle>,
-) -> Vec<String> {
-    let mut object_paths = Vec::with_capacity(64);
-    object_paths.push(device_path.to_owned());
+) -> Vec<(String, IfaceKind)> {
+    let mut object_paths: Vec<(String, IfaceKind)> = Vec::with_capacity(64);
     let object_server = conn.object_server();
 
-    // Register the Device object.
+    /* Register the Device object. */
     let device_obj = device::RatbagDevice::new(
         Arc::clone(&shared_info),
         device_path.to_owned(),
@@ -52,12 +64,14 @@ async fn register_device_on_dbus(
 
     if let Err(e) = object_server.at(device_path, device_obj).await {
         warn!("Failed to register device at {device_path}: {e}");
+        object_paths.push((device_path.to_owned(), IfaceKind::Device));
         return object_paths;
     }
+    object_paths.push((device_path.to_owned(), IfaceKind::Device));
 
-    // Register Profile, Resolution, Button, LED child objects.
-    // We snapshot the structure for iteration but children hold the shared
-    // Arc so mutations propagate correctly to the commit path.
+    /* Register Profile, Resolution, Button, LED child objects.
+     * We snapshot the structure for iteration but children hold the shared
+     * Arc so mutations propagate correctly to the commit path. */
     let info_snapshot = shared_info.read().await;
     for prof in &info_snapshot.profiles {
         let profile_path = format!("{device_path}/p{}", prof.index);
@@ -69,7 +83,7 @@ async fn register_device_on_dbus(
         if let Err(e) = object_server.at(profile_path.as_str(), profile_obj).await {
             warn!("Failed to register profile {profile_path}: {e}");
         }
-        object_paths.push(profile_path.clone());
+        object_paths.push((profile_path.clone(), IfaceKind::Profile));
 
         for res in &prof.resolutions {
             let res_path = format!("{device_path}/p{}/r{}", prof.index, res.index);
@@ -82,7 +96,7 @@ async fn register_device_on_dbus(
             if let Err(e) = object_server.at(res_path.as_str(), res_obj).await {
                 warn!("Failed to register resolution {res_path}: {e}");
             }
-            object_paths.push(res_path);
+            object_paths.push((res_path, IfaceKind::Resolution));
         }
 
         for btn in &prof.buttons {
@@ -95,7 +109,7 @@ async fn register_device_on_dbus(
             if let Err(e) = object_server.at(btn_path.as_str(), btn_obj).await {
                 warn!("Failed to register button {btn_path}: {e}");
             }
-            object_paths.push(btn_path);
+            object_paths.push((btn_path, IfaceKind::Button));
         }
 
         for led_info in &prof.leds {
@@ -108,24 +122,24 @@ async fn register_device_on_dbus(
             if let Err(e) = object_server.at(led_path.as_str(), led_obj).await {
                 warn!("Failed to register LED {led_path}: {e}");
             }
-            object_paths.push(led_path);
+            object_paths.push((led_path, IfaceKind::Led));
         }
     }
-    
+
     object_paths
 }
 
-/// Unregister a device and all its children from the DBus object server,
-/// then remove it from the manager's device list.
-///
-/// Shared between the `Remove` (udev) and `RemoveTest` (dev-hooks) paths.
+/* Unregister a device and all its children from the D-Bus object server,
+ * then remove it from the manager's device list.
+ *
+ * Shared between the `Remove` (udev) and `RemoveTest` (dev-hooks) paths. */
 async fn remove_device(
     conn: &zbus::Connection,
     sysname: &str,
-    registered_devices: &mut HashMap<String, Vec<String>>,
+    registered_devices: &mut HashMap<String, Vec<(String, IfaceKind)>>,
     actor_handles: &mut HashMap<String, ActorHandle>,
 ) -> Result<()> {
-    // Shut down the hardware actor if one is running.
+    /* Shut down the hardware actor if one is running. */
     if let Some(handle) = actor_handles.remove(sysname) {
         handle.shutdown().await;
     }
@@ -133,28 +147,32 @@ async fn remove_device(
     if let Some(paths) = registered_devices.remove(sysname) {
         let object_server = conn.object_server();
 
-        // Remove child objects first (reverse order), then the device itself.
-        // We attempt all interface types per path; only the matching one succeeds.
-        for path in paths.iter().rev() {
-            let _ = object_server
-                .remove::<device::RatbagDevice, _>(path.as_str())
-                .await;
-            let _ = object_server
-                .remove::<profile::RatbagProfile, _>(path.as_str())
-                .await;
-            let _ = object_server
-                .remove::<resolution::RatbagResolution, _>(path.as_str())
-                .await;
-            let _ = object_server
-                .remove::<button::RatbagButton, _>(path.as_str())
-                .await;
-            let _ = object_server
-                .remove::<led::RatbagLed, _>(path.as_str())
-                .await;
+        /* Remove child objects first (reverse order), then the device itself.
+         * Each path is tagged with its interface type so we issue exactly one
+         * removal call per path instead of blindly trying all five. */
+        for (path, kind) in paths.iter().rev() {
+            let result = match kind {
+                IfaceKind::Device =>
+                    object_server.remove::<device::RatbagDevice, _>(path.as_str()).await,
+                IfaceKind::Profile =>
+                    object_server.remove::<profile::RatbagProfile, _>(path.as_str()).await,
+                IfaceKind::Resolution =>
+                    object_server.remove::<resolution::RatbagResolution, _>(path.as_str()).await,
+                IfaceKind::Button =>
+                    object_server.remove::<button::RatbagButton, _>(path.as_str()).await,
+                IfaceKind::Led =>
+                    object_server.remove::<led::RatbagLed, _>(path.as_str()).await,
+            };
+            match result {
+                Ok(false) | Err(_) => {
+                    warn!("Failed to remove {:?} object at {}", kind, path);
+                }
+                Ok(true) => {}
+            }
         }
 
-        // The device root path is always paths[0]; update the manager list.
-        let device_path = &paths[0];
+        /* The device root path is always paths[0]; update the manager list. */
+        let device_path = &paths[0].0;
         let iface_ref = object_server
             .interface::<_, manager::RatbagManager>("/org/freedesktop/ratbag1")
             .await?;
@@ -206,11 +224,29 @@ pub async fn run_server(
         test_rx
     };
 
-    // Track registered device paths so we can clean up on removal.
-    let mut registered_devices: HashMap<String, Vec<String>> = HashMap::new();
+    /* Track registered device paths so we can clean up on removal. */
+    let mut registered_devices: HashMap<String, Vec<(String, IfaceKind)>> = HashMap::new();
 
     // Track actor handles so we can shut them down on removal.
     let mut actor_handles: HashMap<String, ActorHandle> = HashMap::new();
+
+    /* Track which USB topology paths already have a successfully probed
+     * device registered.  HID++ mice (and some other devices) expose
+     * multiple hidraw nodes per physical device — typically one for the
+     * standard HID interface and one for the vendor-specific command
+     * channel.  Both nodes share the same USB topology path (the
+     * HID_PHYS property with the /inputN suffix stripped).
+     *
+     * Keying on phys_path rather than (bustype, vid, pid) ensures that
+     * two physically identical mice on different USB ports are both
+     * discovered, while multiple hidraw nodes of the SAME physical
+     * device are still deduplicated.
+     *
+     * `sysname_to_phys` maps each registered sysname back to its
+     * phys_path so that the Remove handler can clear the entry from
+     * `probed_phys`, allowing re-probing on hotplug. */
+    let mut probed_phys: HashSet<String> = HashSet::new();
+    let mut sysname_to_phys: HashMap<String, String> = HashMap::new();
 
     // Main event loop: process udev device events (and, when dev-hooks is
     // enabled, synthetic test device actions from the DBus manager).
@@ -235,10 +271,11 @@ pub async fn run_server(
                 bustype,
                 vid,
                 pid,
+                phys_path,
             } => {
-                let key = (BusType::from_u16(bustype), vid, pid);
+                let db_key = (BusType::from_u16(bustype), vid, pid);
 
-                let entry = match device_db.get(&key) {
+                let entry = match device_db.get(&db_key) {
                     Some(e) => e,
                     None => {
                         info!(
@@ -248,6 +285,24 @@ pub async fn run_server(
                         continue;
                     }
                 };
+
+                /* A single physical device (e.g. Logitech G403 HERO) can
+                 * expose multiple hidraw nodes — one for the standard HID
+                 * mouse interface and one for the vendor-specific HID++
+                 * command channel.  Both nodes share the same USB topology
+                 * path (phys_path).  Skip this node if we already have a
+                 * successfully probed device for this physical device.
+                 *
+                 * We key on phys_path rather than (bustype, vid, pid) so
+                 * that two identical mice on different USB ports are both
+                 * registered correctly. */
+                if !phys_path.is_empty() && probed_phys.contains(&phys_path) {
+                    info!(
+                        "Skipping {} ({:04x}:{:04x}): already probed on another hidraw node (phys={})",
+                        sysname, vid, pid, phys_path
+                    );
+                    continue;
+                }
 
                 info!(
                     "Matched device: {} -> {} (driver: {})",
@@ -264,7 +319,10 @@ pub async fn run_server(
                 // Wrap DeviceInfo in Arc<RwLock> so actor and DBus share state.
                 let shared_info = Arc::new(RwLock::new(device_info));
 
-                // Try to create and spawn the hardware driver actor.
+                /* Try to create and spawn the hardware driver actor.
+                 * If the probe fails (wrong hidraw interface, unsupported
+                 * firmware, etc.) do NOT register the device on D-Bus —
+                 * it would appear as an empty, non-functional entry. */
                 let actor_handle = match driver::create_driver(&entry.driver) {
                     Some(drv) => {
                         match actor::spawn_device_actor(
@@ -279,63 +337,89 @@ pub async fn run_server(
                                     "Driver {} active for {}",
                                     entry.driver, sysname
                                 );
-                                Some(handle)
+                                handle
                             }
                             Err(e) => {
                                 warn!(
                                     "Driver {} probe failed for {}: {e:#}",
                                     entry.driver, sysname
                                 );
-                                None
+                                continue;
                             }
                         }
                     }
-                    None => None,
+                    None => {
+                        warn!(
+                            "No driver implementation for '{}', skipping {}",
+                            entry.driver, sysname
+                        );
+                        continue;
+                    }
                 };
 
                 let object_paths = register_device_on_dbus(
                     &conn,
                     &device_path,
                     Arc::clone(&shared_info),
-                    actor_handle.clone(),
+                    Some(actor_handle.clone()),
                 )
                 .await;
 
-                // Update the manager's device list.
-                let object_server = conn.object_server();
-                let iface_ref = object_server
-                    .interface::<_, manager::RatbagManager>(
-                        "/org/freedesktop/ratbag1",
-                    )
-                    .await?;
-                iface_ref.get_mut().await.add_device(device_path.clone());
-                iface_ref
-                    .get()
-                    .await
-                    .devices_changed(iface_ref.signal_emitter())
-                    .await?;
+                let child_count = object_paths.len().saturating_sub(1);
 
-                if let Some(handle) = actor_handle {
-                    actor_handles.insert(sysname.clone(), handle);
+                /* Update the manager's device list.  Errors here are
+                 * non-fatal — the device actor is already running and
+                 * the D-Bus objects are registered; only the manager's
+                 * aggregated Devices list would be stale. */
+                let manager_ok = async {
+                    let object_server = conn.object_server();
+                    let iface_ref = object_server
+                        .interface::<_, manager::RatbagManager>(
+                            "/org/freedesktop/ratbag1",
+                        )
+                        .await?;
+                    iface_ref.get_mut().await.add_device(device_path.clone());
+                    iface_ref
+                        .get()
+                        .await
+                        .devices_changed(iface_ref.signal_emitter())
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
                 }
+                .await;
+                if let Err(e) = manager_ok {
+                    warn!("Failed to update manager device list for {}: {e:#}", sysname);
+                }
+
+                actor_handles.insert(sysname.clone(), actor_handle);
                 registered_devices.insert(sysname.clone(), object_paths);
+                if !phys_path.is_empty() {
+                    probed_phys.insert(phys_path.clone());
+                    sysname_to_phys.insert(sysname.clone(), phys_path);
+                }
 
                 info!(
                     "Device {} registered at {} ({} child objects)",
-                    entry.name,
-                    device_path,
-                    registered_devices[&sysname].len() - 1
+                    entry.name, device_path, child_count
                 );
             }
 
             DeviceAction::Remove { sysname } => {
-                remove_device(
+                /* Clear the probed-device entry so a re-plugged device
+                 * can be discovered again on a fresh hidraw node. */
+                if let Some(phys) = sysname_to_phys.remove(&sysname) {
+                    probed_phys.remove(&phys);
+                }
+                if let Err(e) = remove_device(
                     &conn,
                     &sysname,
                     &mut registered_devices,
                     &mut actor_handles,
                 )
-                .await?;
+                .await
+                {
+                    warn!("Failed to cleanly remove device {}: {e:#}", sysname);
+                }
             }
 
             // ----------------------------------------------------------------
@@ -352,7 +436,7 @@ pub async fn run_server(
 
                 let shared_info = Arc::new(RwLock::new(device_info));
 
-                // Test devices have no hardware actor.
+                /* Test devices have no hardware actor. */
                 let object_paths = register_device_on_dbus(
                     &conn,
                     &device_path,
@@ -361,31 +445,41 @@ pub async fn run_server(
                 )
                 .await;
 
-                let object_server = conn.object_server();
-                let iface_ref = object_server
-                    .interface::<_, manager::RatbagManager>(
-                        "/org/freedesktop/ratbag1",
-                    )
-                    .await?;
-                iface_ref.get_mut().await.add_device(device_path.clone());
-                iface_ref
-                    .get()
-                    .await
-                    .devices_changed(iface_ref.signal_emitter())
-                    .await?;
+                let manager_ok = async {
+                    let object_server = conn.object_server();
+                    let iface_ref = object_server
+                        .interface::<_, manager::RatbagManager>(
+                            "/org/freedesktop/ratbag1",
+                        )
+                        .await?;
+                    iface_ref.get_mut().await.add_device(device_path.clone());
+                    iface_ref
+                        .get()
+                        .await
+                        .devices_changed(iface_ref.signal_emitter())
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+                if let Err(e) = manager_ok {
+                    warn!("Failed to update manager for test device {}: {e:#}", sysname);
+                }
 
                 registered_devices.insert(sysname, object_paths);
             }
 
             #[cfg(feature = "dev-hooks")]
             DeviceAction::RemoveTest { sysname } => {
-                remove_device(
+                if let Err(e) = remove_device(
                     &conn,
                     &sysname,
                     &mut registered_devices,
                     &mut actor_handles,
                 )
-                .await?;
+                .await
+                {
+                    warn!("Failed to remove test device {}: {e:#}", sysname);
+                }
             }
         }
     }
