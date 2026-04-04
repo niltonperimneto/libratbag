@@ -357,6 +357,12 @@ impl Hidpp20Driver {
 
     /* Attempt a HID++ 2.0 protocol version probe at a specific device index. */
     /* Returns `Some((major, minor))` on success, `None` on timeout or error. */
+    /*                                                                         */
+    /* Uses a single attempt (max_attempts=1) because a responding device      */
+    /* replies within milliseconds.  The 2-second read deadline is ample for   */
+    /* even busy wireless links, while keeping the total probe phase short     */
+    /* enough that the combined probe+load_profiles stays within the actor's   */
+    /* timeout budget.                                                         */
     async fn try_probe_index(
         &self,
         io: &mut DeviceIo,
@@ -370,7 +376,7 @@ impl Hidpp20Driver {
             &[],
         );
 
-        io.request(&request, 20, 2, move |buf| {
+        io.request(&request, 20, 1, move |buf| {
             let report = HidppReport::parse(buf)?;
             if report.is_error() {
                 return None;
@@ -1177,9 +1183,16 @@ impl super::DeviceDriver for Hidpp20Driver {
     }
 
     async fn probe(&mut self, io: &mut DeviceIo) -> Result<()> {
-        /* Try the wireless receiver index first (most gaming mice are wireless), */
-        /* then fall back to the corded device index.                             */
-        const PROBE_INDICES: &[u8] = &[DEVICE_IDX_RECEIVER, DEVICE_IDX_CORDED];
+        /* Try the corded device index first, then the wireless receiver index.
+         *
+         * Wired mice respond to 0xFF instantly; probing 0x01 first wastes up
+         * to 2 seconds in a read timeout because no device is listening at
+         * that index.  Wireless mice on a DJ-managed hidraw node get a fast
+         * error or timeout at 0xFF (the response goes to the receiver's own
+         * node, not the mouse's), then succeed at 0x01.  Either way the
+         * worst-case penalty is one single-read timeout (~2 s) rather than
+         * the previous four seconds. */
+        const PROBE_INDICES: &[u8] = &[DEVICE_IDX_CORDED, DEVICE_IDX_RECEIVER];
 
         for &idx in PROBE_INDICES {
             if let Some((major, minor)) = self.try_probe_index(io, idx).await {
