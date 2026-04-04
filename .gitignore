@@ -17,3 +17,5 @@ test/
 .claude/rules/rust-linux-devel.instructions.md
 ratbagctl-rs/ratbagctl
 ratbagd-rs/ratbagd
+node_modules
+.claude/settings.local.json
