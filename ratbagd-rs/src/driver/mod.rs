@@ -152,6 +152,11 @@ impl DeviceIo {
         })
     }
 
+    /* Return the path of the underlying hidraw device node. */
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /* Write a raw HID report to the device. */
     pub async fn write_report(&mut self, buf: &[u8]) -> Result<()> {
         self.file
@@ -383,8 +388,8 @@ pub fn create_driver(driver_name: &str) -> Option<Box<dyn DeviceDriver>> {
         "roccat" | "roccat-kone-pure" | "roccat-kone-emp" => {
             Some(Box::new(roccat::RoccatDriver::new(driver_name)))
         }
-        "sinowealth" => Some(Box::new(sinowealth::SinowealhDriver::new())),
-        "sinowealth-nubwo" => Some(Box::new(sinowealth_nubwo::SinowealhNubwoDriver::new())),
+        "sinowealth" => Some(Box::new(sinowealth::SinowealthDriver::new())),
+        "sinowealth-nubwo" => Some(Box::new(sinowealth_nubwo::SinowealthNubwoDriver::new())),
         "steelseries" => Some(Box::new(steelseries::SteelseriesDriver::new())),
         _ => {
             warn!("Unknown driver: {driver_name}");

@@ -112,18 +112,18 @@ struct NubwoData {
 /* Driver                                                               */
 /* ------------------------------------------------------------------ */
 
-pub struct SinowealhNubwoDriver {
+pub struct SinowealthNubwoDriver {
     data: Option<NubwoData>,
 }
 
-impl SinowealhNubwoDriver {
+impl SinowealthNubwoDriver {
     pub fn new() -> Self {
         Self { data: None }
     }
 }
 
 #[async_trait]
-impl DeviceDriver for SinowealhNubwoDriver {
+impl DeviceDriver for SinowealthNubwoDriver {
     fn name(&self) -> &str {
         "SinoWealth-Nubwo"
     }

@@ -80,6 +80,44 @@ pub struct DriverConfig {
     pub button_mapping: Vec<u8>,
     pub button_mapping_secondary: Vec<u8>,
     pub led_modes: Vec<String>,
+    /// SinoWealth firmware-versioned device entries from
+    /// `[Driver/sinowealth/devices/<fw_version>]` sections.
+    pub sinowealth_devices: Vec<SinowealthDeviceConfig>,
+}
+
+/* LED channel order for SinoWealth devices. */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SinowealthLedType {
+    #[default]
+    None,
+    /// Standard RGB channel order.
+    Rgb,
+    /// Swapped green/blue channels (e.g. Glorious Model O).
+    Rbg,
+}
+
+impl SinowealthLedType {
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_uppercase().as_str() {
+            "RGB" => Self::Rgb,
+            "RBG" => Self::Rbg,
+            _ => Self::None,
+        }
+    }
+}
+
+/* Per-firmware-version device config from `[Driver/sinowealth/devices/<fw>]`. */
+#[derive(Debug, Clone)]
+pub struct SinowealthDeviceConfig {
+    /// Firmware version string (e.g. "V102", "3106").
+    pub firmware_version: String,
+    pub device_name: String,
+    pub buttons: u32,
+    pub led_type: SinowealthLedType,
+    /// Sensor name string (e.g. "PMW3360", "PMW3389").
+    pub sensor_type: String,
+    /// Number of on-board profiles; defaults to 1 if absent.
+    pub profiles: u32,
 }
 
 /* A DPI range specification parsed from `DpiRange=min:max@step`. */
@@ -183,11 +221,25 @@ fn parse_device_file(path: &Path) -> Result<DeviceEntry, String> {
         || ini.get(&driver_section, "buttonmappingsecondary").is_some()
         || ini.get(&driver_section, "ledmodes").is_some();
 
-    let driver_config = if has_driver_section {
+    /* Parse SinoWealth firmware-versioned subsections if present. */
+    let sinowealth_devices = parse_sinowealth_device_sections(&ini, &driver);
+
+    let mut driver_config = if has_driver_section {
         Some(parse_driver_config(&ini, &driver_section))
+    } else if !sinowealth_devices.is_empty() {
+        /* SinoWealth files may lack a flat [Driver/sinowealth] section but
+         * still carry per-firmware subsections.  Create a default config. */
+        Some(DriverConfig::default())
     } else {
         None
     };
+
+    /* Attach the sinowealth device list to the driver config. */
+    if !sinowealth_devices.is_empty() {
+        if let Some(cfg) = driver_config.as_mut() {
+            cfg.sinowealth_devices = sinowealth_devices;
+        }
+    }
 
     Ok(DeviceEntry {
         name,
@@ -278,7 +330,57 @@ fn parse_driver_config(ini: &Ini, section: &str) -> DriverConfig {
         button_mapping,
         button_mapping_secondary,
         led_modes,
+        sinowealth_devices: Vec::new(),
     }
+}
+
+/* Parse `[Driver/sinowealth/devices/<fw_version>]` subsections.
+ *
+ * configparser lowercases all section names, so we uppercase the firmware
+ * version suffix to match the format produced by `format_firmware_version`. */
+fn parse_sinowealth_device_sections(ini: &Ini, driver: &str) -> Vec<SinowealthDeviceConfig> {
+    let prefix = format!("driver/{}/devices/", driver);
+    let mut devices = Vec::new();
+
+    for section_name in ini.sections() {
+        if !section_name.starts_with(&prefix) {
+            continue;
+        }
+        let fw_version = section_name[prefix.len()..].to_uppercase();
+        if fw_version.is_empty() {
+            continue;
+        }
+
+        let buttons = ini
+            .get(&section_name, "buttons")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        let device_name = ini
+            .get(&section_name, "devicename")
+            .unwrap_or_default();
+        let led_type_str = ini
+            .get(&section_name, "ledtype")
+            .unwrap_or_default();
+        let sensor_type = ini
+            .get(&section_name, "sensortype")
+            .unwrap_or_default()
+            .to_uppercase();
+        let profiles = ini
+            .get(&section_name, "profiles")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+
+        devices.push(SinowealthDeviceConfig {
+            firmware_version: fw_version,
+            device_name,
+            buttons,
+            led_type: SinowealthLedType::from_str(&led_type_str),
+            sensor_type,
+            profiles,
+        });
+    }
+
+    devices
 }
 
 /* Split a semicolon-delimited string into trimmed, non-empty strings. */
