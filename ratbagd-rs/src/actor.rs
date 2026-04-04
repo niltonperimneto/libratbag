@@ -133,17 +133,17 @@ impl DeviceActor {
     }
 }
 
-/* Maximum time allowed for probing a device and loading its profiles.
- *
- * The kernel's HID request timeout is 5 seconds (via hid_hw_request),
- * but a full probe can involve multiple round-trips: version ping,
- * feature discovery (one RTT per feature page), onboard-mode switch,
- * root directory sector read, and per-profile sector reads.  A complex
- * device like the G502 with 8 feature pages and 5 onboard profiles
- * completes in roughly 2 seconds on a healthy USB bus; 10 seconds
- * provides ample headroom for slow wireless receivers while still
- * preventing an indefinite hang from blocking the event loop. */
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/* Maximum time allowed for the protocol probe phase (version ping +
+ * feature discovery).  HID++ 2.0 probes up to two device indices;
+ * a non-responding index burns one READ_TIMEOUT_PER_ATTEMPT (2 s)
+ * cycle, so 8 seconds covers the worst case with headroom. */
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/* Maximum time allowed for loading profiles from hardware.  Complex
+ * devices (e.g. G502 with 5 onboard profiles and multiple sector
+ * reads) need several seconds; 15 seconds is generous even on a
+ * congested wireless link. */
+const LOAD_PROFILES_TIMEOUT: Duration = Duration::from_secs(15);
 
 /* Spawn a device actor for the given hardware device.
  *
@@ -163,40 +163,46 @@ pub async fn spawn_device_actor(
         .await
         .with_context(|| format!("Opening {}", devnode.display()))?;
 
-    /* Probe and load profiles under a single timeout.  If the device
-     * hangs (firmware bug, USB glitch, receiver in bad state) we bail
-     * out rather than blocking the event loop indefinitely. */
     let driver_name = driver.name().to_string();
     let devnode_display = devnode.display().to_string();
 
+    /* Probe and load_profiles have separate timeout budgets so that a
+     * slow probe (e.g. a wired device that first tries the wrong
+     * device index) does not eat into the time available for profile
+     * loading, which involves many sector reads. */
     tokio::time::timeout(PROBE_TIMEOUT, async {
-        /* Probe: confirm the device speaks this protocol */
         driver
             .probe(&mut io)
             .await
-            .with_context(|| format!("Probing {} with {}", devnode_display, driver_name))?;
-
-        /* Load the full device state from hardware */
-        {
-            let mut device_info = info.write().await;
-            driver
-                .load_profiles(&mut io, &mut device_info)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Loading profiles from {} with {}",
-                        devnode_display, driver_name
-                    )
-                })?;
-        }
-
-        Ok::<(), anyhow::Error>(())
+            .with_context(|| format!("Probing {} with {}", devnode_display, driver_name))
     })
     .await
     .map_err(|_| {
         anyhow::anyhow!(
             "Probe timed out after {}s for {} with {}",
             PROBE_TIMEOUT.as_secs(),
+            devnode.display(),
+            driver.name()
+        )
+    })??;
+
+    tokio::time::timeout(LOAD_PROFILES_TIMEOUT, async {
+        let mut device_info = info.write().await;
+        driver
+            .load_profiles(&mut io, &mut device_info)
+            .await
+            .with_context(|| {
+                format!(
+                    "Loading profiles from {} with {}",
+                    devnode_display, driver_name
+                )
+            })
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Profile loading timed out after {}s for {} with {}",
+            LOAD_PROFILES_TIMEOUT.as_secs(),
             devnode.display(),
             driver.name()
         )
