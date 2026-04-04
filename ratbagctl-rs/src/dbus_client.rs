@@ -271,7 +271,10 @@ impl RatbagClient {
     }
 
     pub async fn set_resolution_dpi(&self, path: &str, dpi: u32) -> Result<()> {
-        self.set_property(path, RESOLUTION_IFACE, "Resolution", Value::from(dpi))
+        let owned = OwnedValue::try_from(Value::from((dpi, dpi)))
+            .map_err(|e| anyhow!("Failed to encode D-Bus value: {e}"))?;
+        let wrapped = Value::Value(Box::new(owned.into()));
+        self.set_property(path, RESOLUTION_IFACE, "Resolution", wrapped)
             .await
     }
 
