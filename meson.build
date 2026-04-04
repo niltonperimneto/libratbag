@@ -3,7 +3,7 @@ project(
     'rust',
     version: '1.0.0',
     license: ['GPL-3.0-or-later', 'MIT'],
-    meson_version: '>= 0.56.0',
+    meson_version: '>= 0.59.0',
 )
 
 project_source_root = meson.project_source_root()
@@ -11,10 +11,8 @@ project_source_root = meson.project_source_root()
 # DBus API version (must remain in sync with client expectations)
 ratbagd_api_version = 2
 
-enable_systemd = get_option('systemd')
-if enable_systemd
-    dep_systemd = dependency('systemd')
-endif
+dep_systemd = dependency('systemd', required: get_option('systemd'))
+enable_systemd = dep_systemd.found()
 
 cargo = find_program('cargo', required: true)
 cargo_path = cargo.full_path()

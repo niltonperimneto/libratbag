@@ -81,7 +81,7 @@ Build Requirements
   `ratbagd-rs`, edition 2021 for `ratbagctl-rs`) and Cargo.
   Install via [rustup](https://rustup.rs/) or your distribution's package
   manager.
-- **Meson** (>= 0.50) and **Ninja**.
+- **Meson** (>= 0.59) and **Ninja**.
 - **System libraries**: `libudev` (required for runtime udev monitoring) and
   `systemd` (only for installing the unit file; optional if you package the
   service files yourself).
