@@ -29,9 +29,17 @@ pub enum DeviceAction {
         /* USB topology path from the HID_PHYS property with the
          * `/inputN` interface suffix stripped.  Two hidraw nodes of
          * the same physical device share this prefix; two separate
-         * mice on different USB ports do not.  Used for deduplication
-         * so that a second identical mouse is not silently dropped. */
+         * mice on different USB ports do not.  Combined with
+         * `hid_uniq` for deduplication so that multiple devices on
+         * the same receiver (e.g. Logitech Unifying) are not
+         * incorrectly grouped together. */
         phys_path: String,
+        /* HID_UNIQ property: the device serial number.  Different
+         * logical devices on a multi-device receiver (Unifying, Bolt)
+         * have distinct HID_UNIQ values even though they share the
+         * same USB topology path.  Empty for devices that don't
+         * report a serial. */
+        hid_uniq: String,
     },
     Remove {
         sysname: String,
@@ -76,10 +84,10 @@ pub async fn run(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> R
  * thread.  Returns `Ok(())` when the channel is closed (receiver dropped)
  * or `Err` on a udev/poll failure. */
 fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Result<()> {
-    /* Enumerate existing devices first. */
-    enumerate_existing(&tx)?;
-
-    /* Set up the hotplug monitor. */
+    /* Start the hotplug monitor BEFORE enumeration so that any devices
+     * plugged in while we scan the existing set are queued by the kernel
+     * and picked up in the first poll iteration.  The classic udev race
+     * (enumerate → start monitor) loses events that arrive in the gap. */
     let monitor = udev::MonitorBuilder::new()
         .context("MonitorBuilder::new")?
         .match_subsystem("hidraw")
@@ -88,6 +96,10 @@ fn run_blocking(tx: mpsc::Sender<DeviceAction>, shutdown: Arc<AtomicBool>) -> Re
         .context("MonitorSocket::listen")?;
 
     info!("udev hotplug monitor listening on hidraw subsystem");
+
+    /* Now enumerate existing devices.  Any hotplug events that arrive
+     * during this scan are safely queued by the monitor socket. */
+    enumerate_existing(&tx)?;
 
     /* Use poll(2) to wait for events on the udev monitor fd.  The
      * one-second timeout lets us re-enter the loop and detect a closed
@@ -221,6 +233,17 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         })
         .unwrap_or_default();
 
+    /* Extract HID_UNIQ: the device serial number.  Multi-device
+     * receivers (Unifying, Bolt) assign a unique serial to each
+     * paired device; wired mice typically leave this empty or set it
+     * to a fixed value.  Used together with phys_path to form the
+     * deduplication key so that two mice on the same receiver are
+     * not incorrectly collapsed into one. */
+    let hid_uniq = hid_parent
+        .property_value("HID_UNIQ")
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     Some(DeviceAction::Add {
         sysname,
         devnode,
@@ -229,6 +252,7 @@ fn build_add_action(device: &udev::Device) -> Option<DeviceAction> {
         vid,
         pid,
         phys_path,
+        hid_uniq,
     })
 }
 

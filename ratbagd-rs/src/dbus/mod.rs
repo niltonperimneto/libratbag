@@ -9,6 +9,7 @@ pub mod resolution;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, RwLock};
@@ -230,23 +231,26 @@ pub async fn run_server(
     // Track actor handles so we can shut them down on removal.
     let mut actor_handles: HashMap<String, ActorHandle> = HashMap::new();
 
-    /* Track which USB topology paths already have a successfully probed
+    /* Track which physical devices already have a successfully probed
      * device registered.  HID++ mice (and some other devices) expose
      * multiple hidraw nodes per physical device — typically one for the
      * standard HID interface and one for the vendor-specific command
      * channel.  Both nodes share the same USB topology path (the
      * HID_PHYS property with the /inputN suffix stripped).
      *
-     * Keying on phys_path rather than (bustype, vid, pid) ensures that
-     * two physically identical mice on different USB ports are both
-     * discovered, while multiple hidraw nodes of the SAME physical
-     * device are still deduplicated.
+     * The dedup key is `"{phys_path}\0{hid_uniq}"`.  Using phys_path
+     * alone would incorrectly collapse two mice paired to the same
+     * multi-device receiver (Logitech Unifying, Bolt, etc.) since they
+     * share the same USB topology.  Including HID_UNIQ (the per-device
+     * serial number) distinguishes them while still deduplicating the
+     * multiple hidraw nodes of a single mouse (which share both
+     * phys_path AND HID_UNIQ).
      *
-     * `sysname_to_phys` maps each registered sysname back to its
-     * phys_path so that the Remove handler can clear the entry from
-     * `probed_phys`, allowing re-probing on hotplug. */
-    let mut probed_phys: HashSet<String> = HashSet::new();
-    let mut sysname_to_phys: HashMap<String, String> = HashMap::new();
+     * `sysname_to_dedup_key` maps each registered sysname back to its
+     * dedup key so that the Remove handler can clear the entry from
+     * `probed_devices`, allowing re-probing on hotplug. */
+    let mut probed_devices: HashSet<String> = HashSet::new();
+    let mut sysname_to_dedup_key: HashMap<String, String> = HashMap::new();
 
     // Main event loop: process udev device events (and, when dev-hooks is
     // enabled, synthetic test device actions from the DBus manager).
@@ -272,6 +276,7 @@ pub async fn run_server(
                 vid,
                 pid,
                 phys_path,
+                hid_uniq,
             } => {
                 let db_key = (BusType::from_u16(bustype), vid, pid);
 
@@ -290,16 +295,21 @@ pub async fn run_server(
                  * expose multiple hidraw nodes — one for the standard HID
                  * mouse interface and one for the vendor-specific HID++
                  * command channel.  Both nodes share the same USB topology
-                 * path (phys_path).  Skip this node if we already have a
-                 * successfully probed device for this physical device.
+                 * path (phys_path) AND the same serial (hid_uniq).
                  *
-                 * We key on phys_path rather than (bustype, vid, pid) so
-                 * that two identical mice on different USB ports are both
-                 * registered correctly. */
-                if !phys_path.is_empty() && probed_phys.contains(&phys_path) {
+                 * The dedup key combines both fields so that:
+                 * - Multiple hidraw nodes of ONE mouse are collapsed (same
+                 *   phys + same uniq).
+                 * - Two mice on the same multi-device receiver (Unifying,
+                 *   Bolt) are kept separate (same phys, different uniq).
+                 * - Two identical mice on different USB ports are kept
+                 *   separate (different phys). */
+                let dedup_key = format!("{}\0{}", phys_path, hid_uniq);
+                if !phys_path.is_empty() && probed_devices.contains(&dedup_key) {
                     info!(
-                        "Skipping {} ({:04x}:{:04x}): already probed on another hidraw node (phys={})",
-                        sysname, vid, pid, phys_path
+                        "Skipping {} ({:04x}:{:04x}): already probed on another hidraw node \
+                         (phys={}, uniq={})",
+                        sysname, vid, pid, phys_path, hid_uniq
                     );
                     continue;
                 }
@@ -317,12 +327,18 @@ pub async fn run_server(
                 );
 
                 // Wrap DeviceInfo in Arc<RwLock> so actor and DBus share state.
-                let shared_info = Arc::new(RwLock::new(device_info));
+                // `mut` because the retry path may replace this with fresh state.
+                let mut shared_info = Arc::new(RwLock::new(device_info));
 
                 /* Try to create and spawn the hardware driver actor.
                  * If the probe fails (wrong hidraw interface, unsupported
                  * firmware, etc.) do NOT register the device on D-Bus —
-                 * it would appear as an empty, non-functional entry. */
+                 * it would appear as an empty, non-functional entry.
+                 *
+                 * A single retry after a short delay handles transient
+                 * failures during USB settle (device not ready yet) and
+                 * avoids permanently missing a device that just needed a
+                 * moment to initialize. */
                 let actor_handle = match driver::create_driver(&entry.driver) {
                     Some(drv) => {
                         match actor::spawn_device_actor(
@@ -340,11 +356,59 @@ pub async fn run_server(
                                 handle
                             }
                             Err(e) => {
-                                warn!(
-                                    "Driver {} probe failed for {}: {e:#}",
+                                info!(
+                                    "Driver {} probe failed for {} (attempt 1/2): {e:#}, \
+                                     retrying after settle delay",
                                     entry.driver, sysname
                                 );
-                                continue;
+
+                                /* Brief delay for USB settle before retry. */
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                                match driver::create_driver(&entry.driver) {
+                                    Some(drv2) => {
+                                        /* Re-create shared_info for the retry since the
+                                         * first attempt may have partially mutated it. */
+                                        let retry_info = Arc::new(RwLock::new(
+                                            DeviceInfo::from_entry(
+                                                &sysname, &name, bustype, vid, pid, entry,
+                                            ),
+                                        ));
+                                        match actor::spawn_device_actor(
+                                            &devnode,
+                                            drv2,
+                                            Arc::clone(&retry_info),
+                                        )
+                                        .await
+                                        {
+                                            Ok(handle) => {
+                                                /* Swap in the fresh info for DBus
+                                                 * registration below. */
+                                                shared_info = retry_info;
+                                                info!(
+                                                    "Driver {} active for {} (retry succeeded)",
+                                                    entry.driver, sysname
+                                                );
+                                                handle
+                                            }
+                                            Err(e2) => {
+                                                warn!(
+                                                    "Driver {} probe failed for {} (attempt 2/2): \
+                                                     {e2:#}",
+                                                    entry.driver, sysname
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        warn!(
+                                            "No driver implementation for '{}' on retry",
+                                            entry.driver
+                                        );
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }
@@ -394,8 +458,8 @@ pub async fn run_server(
                 actor_handles.insert(sysname.clone(), actor_handle);
                 registered_devices.insert(sysname.clone(), object_paths);
                 if !phys_path.is_empty() {
-                    probed_phys.insert(phys_path.clone());
-                    sysname_to_phys.insert(sysname.clone(), phys_path);
+                    probed_devices.insert(dedup_key.clone());
+                    sysname_to_dedup_key.insert(sysname.clone(), dedup_key);
                 }
 
                 info!(
@@ -407,8 +471,8 @@ pub async fn run_server(
             DeviceAction::Remove { sysname } => {
                 /* Clear the probed-device entry so a re-plugged device
                  * can be discovered again on a fresh hidraw node. */
-                if let Some(phys) = sysname_to_phys.remove(&sysname) {
-                    probed_phys.remove(&phys);
+                if let Some(key) = sysname_to_dedup_key.remove(&sysname) {
+                    probed_devices.remove(&key);
                 }
                 if let Err(e) = remove_device(
                     &conn,
