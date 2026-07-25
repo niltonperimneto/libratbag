@@ -43,7 +43,6 @@ pub mod special_action {
     pub const WHEEL_RIGHT:           u32 = BASE + 3;
     pub const WHEEL_UP:              u32 = BASE + 4;
     pub const WHEEL_DOWN:            u32 = BASE + 5;
-    pub const RATCHET_MODE_SWITCH:   u32 = BASE + 6;
     pub const RESOLUTION_CYCLE_UP:   u32 = BASE + 7;
     pub const RESOLUTION_CYCLE_DOWN: u32 = BASE + 8;
     pub const RESOLUTION_UP:         u32 = BASE + 9;
@@ -146,7 +145,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub model: String,
     pub firmware_version: String,
-    /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse, 3=keyboard */
+    /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse. */
+    /* (3 was keyboard; keyboard support migrated to clackd, see docs/keyboard-migration-clackd.md.) */
     pub device_type: u32,
     pub profiles: Vec<ProfileInfo>,
     pub driver_config: crate::engine::device_database::DriverConfig,
@@ -259,7 +259,6 @@ impl DeviceInfo {
         /* Map the .device file's DeviceType string to the DBus integer enum. */
         let device_type = match entry.device_type.to_lowercase().as_str() {
             "mouse" => 2,
-            "keyboard" => 3,
             "other" => 1,
             _ => 0, /* unspecified */
         };

@@ -19,13 +19,6 @@ use crate::hal::{DeviceDriver, DeviceIo};
 /* ------------------------------------------------------------------ */
 
 const NUM_PROFILES: usize = 5;
-const NUM_RESOLUTIONS_PER_PROFILE: usize = 5;
-const NUM_BUTTONS: usize = 19;
-const NUM_LED: usize = 1;
-
-const RES_MIN: u32 = 50;    /* DPI */
-const RES_MAX: u32 = 16400; /* DPI */
-const RES_SCALING: u32 = 50;
 
 /* ------------------------------------------------------------------ */
 /* Report types                                                         */
@@ -35,11 +28,8 @@ const RES_SCALING: u32 = 50;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportType {
-    Unknown1 = 0x01,
     Write = 0x02,
     Read = 0x03,
-    Unknown4 = 0x04,
-    Unknown6 = 0x06,
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,18 +114,6 @@ impl Default for ButtonReport {
 /* LED report (16 bytes)                                                */
 /* ------------------------------------------------------------------ */
 
-/// LED color mode.
-#[repr(u8)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LedMode {
-    #[default]
-    Off = 0x00,
-    Static = 0x01,
-    Breathing = 0x02,
-    Rainbow = 0x03,
-}
-
 /// LED state (6 bytes payload within the LED report).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LedState {
@@ -168,6 +146,8 @@ pub struct LedReport {
 /* Per-profile cached data                                              */
 /* ------------------------------------------------------------------ */
 
+/* Populated during probe; read only once load_profiles/commit are ported. */
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 struct ProfileData {
     buttons: ButtonReport,
@@ -179,6 +159,8 @@ struct ProfileData {
 /* Device-level cached state                                            */
 /* ------------------------------------------------------------------ */
 
+/* Populated during probe; read only once load_profiles/commit are ported. */
+#[allow(dead_code)]
 #[derive(Debug)]
 struct MarsData {
     profiles: Vec<ProfileData>,
@@ -243,25 +225,4 @@ impl DeviceDriver for MarsGamingDriver {
             "MarsGaming driver: commit not yet implemented in the Rust port"
         );
     }
-}
-
-/* ------------------------------------------------------------------ */
-/* Helpers                                                              */
-/* ------------------------------------------------------------------ */
-
-/// Encode a DPI value to its 16-bit hardware representation.
-///
-/// The device stores DPI as `dpi / RES_SCALING`.
-#[allow(dead_code)]
-pub fn dpi_to_raw(dpi: u32) -> Option<u16> {
-    if dpi < RES_MIN || dpi > RES_MAX || dpi % RES_SCALING != 0 {
-        return None;
-    }
-    u16::try_from(dpi / RES_SCALING).ok()
-}
-
-/// Decode the raw 16-bit DPI value to Hz.
-#[allow(dead_code)]
-pub fn raw_to_dpi(raw: u16) -> u32 {
-    u32::from(raw) * RES_SCALING
 }

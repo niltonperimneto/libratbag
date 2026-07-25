@@ -71,9 +71,6 @@ pub enum DriverError {
         function: u8,
     },
 
-    #[error("HID++ 2.0 probe failed: no device responded (tried indices: {indices:02X?})")]
-    Hidpp20ProbeFailure { indices: Vec<u8> },
-
     /* The receiver answered the probe with RESOURCE_ERROR: the paired    */
     /* device exists but is asleep or powered off.  The registration path */
     /* parks such devices and re-probes when they wake instead of         */
@@ -84,29 +81,6 @@ pub enum DriverError {
 
 /* HID++ 2.0 error code 0x08: the device is temporarily busy. */
 pub const HIDPP20_ERR_BUSY: u8 = 0x08;
-
-/* True when the error chain indicates a transient condition worth
- * retrying soon (hardware timeout or device-busy), as opposed to a
- * definitive protocol answer such as INVALID_FEATURE_INDEX. */
-pub fn is_transient_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<DriverError>(),
-            Some(DriverError::Timeout { .. })
-                | Some(DriverError::Hidpp20Error {
-                    error_code: HIDPP20_ERR_BUSY,
-                    ..
-                })
-        )
-    })
-}
-
-/* Maximum HID report size.                                        */
-/*                                                                 */
-/* Roccat macros are the largest at 2082 bytes. We use 4096 as    */
-/* a safe ceiling covering any current and future HID report.     */
-#[allow(dead_code)]
-const MAX_REPORT_LEN: usize = 4096;
 
 /* Total time budget for each attempt's read loop.                */
 /*                                                                */
@@ -148,7 +122,6 @@ fn hid_get_feature_req(len: usize) -> libc::c_ulong {
 /* Compute the `HIDIOCSFEATURE(len)` ioctl request number.        */
 /*                                                                */
 /* Linux hidraw.h: `_IOC(_IOC_READ|_IOC_WRITE, 'H', 0x06, len)`. */
-#[allow(dead_code)]
 fn hid_set_feature_req(len: usize) -> libc::c_ulong {
     let ioc_readwrite: libc::c_ulong = 3;
     let ioc_type: libc::c_ulong = b'H' as libc::c_ulong;

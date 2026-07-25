@@ -15,11 +15,9 @@ pub const HIDPP20_ERROR: u8 = 0xFF;
 /* HID++ 1.0 error codes carried in 0x8F reports.  Receivers use these  */
 /* even when the tunnelled request was HID++ 2.0.                       */
 /*                                                                      */
-/* UNKNOWN_DEVICE: no device is paired at the addressed index.          */
 /* RESOURCE_ERROR: the paired device is unreachable — asleep or powered */
 /* off.  Solaar and the C driver treat this as "try again once the      */
 /* device wakes", not as a protocol failure.                            */
-pub const HIDPP10_ERR_UNKNOWN_DEVICE: u8 = 0x08;
 pub const HIDPP10_ERR_RESOURCE_ERROR: u8 = 0x09;
 
 /* Well-known device indices.                                      */
@@ -32,7 +30,6 @@ pub const DEVICE_IDX_CORDED: u8 = 0xFF;
 pub const DEVICE_IDX_RECEIVER: u8 = 0x01;
 
 /* HID++ 2.0 feature pages */
-pub const PAGE_DEVICE_NAME: u16 = 0x0005;
 pub const PAGE_SPECIAL_KEYS_BUTTONS: u16 = 0x1B04;
 pub const PAGE_ADJUSTABLE_DPI: u16 = 0x2201;
 pub const PAGE_ADJUSTABLE_REPORT_RATE: u16 = 0x8060;

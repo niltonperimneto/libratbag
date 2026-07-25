@@ -48,7 +48,7 @@ impl RatbagDevice {
         self.info.read().await.firmware_version.clone()
     }
 
-    /// Device type: 0=unspecified, 1=other, 2=mouse, 3=keyboard.
+    /// Device type: 0=unspecified, 1=other, 2=mouse.
     #[zbus(property)]
     async fn device_type(&self) -> u32 {
         self.info.read().await.device_type

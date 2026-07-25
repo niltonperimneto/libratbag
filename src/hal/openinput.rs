@@ -489,17 +489,6 @@ impl DeviceDriver for OpenInputDriver {
 /* Helpers                                                              */
 /* ------------------------------------------------------------------ */
 
-/* Build a short OpenInput feature request. */
-#[allow(dead_code)]
-pub fn build_request(page: u8, function: u8) -> OiReport {
-    OiReport {
-        id: OI_REPORT_SHORT,
-        function_page: page,
-        function,
-        data: [0u8; OI_REPORT_DATA_MAX_SIZE],
-    }
-}
-
 /* Return a human-readable name for a function page. */
 pub fn page_name(page: u8) -> &'static str {
     match page {
