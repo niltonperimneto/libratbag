@@ -38,13 +38,11 @@ pub enum CommandId {
     GetConfig = 0x11,
     GetButtons = 0x12,
     Debounce = 0x1a,
-    LongAngleSnappingAndLod = 0x1b,
     GetConfig2 = 0x21,
     GetButtons2 = 0x22,
     Macro = 0x30,
     GetConfig3 = 0x31,
     GetButtons3 = 0x32,
-    Dfu = 0x75,
 }
 
 /* ------------------------------------------------------------------ */
@@ -55,7 +53,6 @@ pub const SINOWEALTH_CMD_SIZE: usize = 6;
 pub const SINOWEALTH_CONFIG_REPORT_SIZE: usize = 520;
 pub const SINOWEALTH_CONFIG_SIZE_MAX: usize = 167;
 pub const SINOWEALTH_CONFIG_SIZE_MIN: usize = 123;
-pub const SINOWEALTH_BUTTON_SIZE: usize = 88;
 pub const SINOWEALTH_BUTTON_REPORT_SIZE: usize = 520;
 pub const SINOWEALTH_MACRO_SIZE: usize = 515;
 
@@ -63,7 +60,6 @@ pub const SINOWEALTH_DPI_MIN: u32 = 100;
 pub const SINOWEALTH_DPI_STEP: u32 = 100;
 
 pub const SINOWEALTH_NUM_DPIS: usize = 8;
-pub const SINOWEALTH_NUM_PROFILES_MAX: usize = 3;
 pub const SINOWEALTH_NUM_BUTTONS: usize = 20;
 pub const SINOWEALTH_MACRO_LENGTH_MAX: usize = 168;
 pub const SINOWEALTH_MACRO_EVENT_SIZE: usize = 3;
@@ -81,7 +77,6 @@ mod offset {
     pub const DPI_COUNT: usize = 6;
     pub const DPI_SLOTS: usize = 7;
     pub const DPI_ACTIVE_COLOR: usize = 23;
-    pub const DPI_COLORS: usize = 24;
     pub const REPORT_RATE: usize = 72;
     pub const LED_EFFECT: usize = 77;
     pub const LED_COLOR: usize = 78;
@@ -361,6 +356,9 @@ fn encode_button(action_type: ActionType, value: u32) -> [u8; 4] {
 /* Cached hardware state                                                */
 /* ------------------------------------------------------------------ */
 
+/* firmware_version and config_size are populated during probe but not yet
+ * consumed; they become relevant once per-device quirk handling is ported. */
+#[allow(dead_code)]
 #[derive(Debug)]
 struct SinowealthData {
     firmware_version: [u8; 2],

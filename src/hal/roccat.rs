@@ -6,24 +6,16 @@ use tracing::debug;
 use std::time::Duration;
 
 /* Protocol constants from driver-roccat.c */
-#[allow(dead_code)]
 const ROCCAT_PROFILE_MAX: u8 = 4;
-#[allow(dead_code)]
-const ROCCAT_BUTTON_MAX: u8 = 23;
-#[allow(dead_code)]
 const ROCCAT_NUM_DPI: u8 = 5;
 
 const ROCCAT_REPORT_ID_CONFIGURE_PROFILE: u8 = 4;
 const ROCCAT_REPORT_ID_PROFILE: u8 = 5;
-#[allow(dead_code)]
 const ROCCAT_REPORT_ID_SETTINGS: u8 = 6;
-#[allow(dead_code)]
 const ROCCAT_REPORT_ID_KEY_MAPPING: u8 = 7;
-#[allow(dead_code)]
 const ROCCAT_REPORT_ID_MACRO: u8 = 8;
 
 const ROCCAT_MAX_RETRY_READY: usize = 10;
-#[allow(dead_code)]
 const ROCCAT_MAX_MACRO_LENGTH: usize = 500;
 
 /* Each Roccat button mapping is a 3-byte stride: [action, param1, param2] */
@@ -223,7 +215,6 @@ pub struct RoccatDriver {
 /* Translate a raw Roccat bytecode to a unified (ActionType, mapping_value).
  * mapping_value for Special actions uses the canonical constants from
  * crate::engine::device::special_action (matching the C libratbag enum). */
-#[allow(dead_code)]
 fn roccat_raw_to_action(raw: u8) -> (crate::engine::device::ActionType, u32) {
     use crate::engine::device::ActionType;
     use crate::engine::device::special_action as sa;
@@ -261,7 +252,6 @@ fn roccat_raw_to_action(raw: u8) -> (crate::engine::device::ActionType, u32) {
 }
 
 /* Translate a unified (ActionType, mapping_value) back to a raw Roccat bytecode. */
-#[allow(dead_code)]
 fn roccat_action_to_raw(action: crate::engine::device::ActionType, val: u32) -> u8 {
     use crate::engine::device::ActionType;
     use crate::engine::device::special_action as sa;
@@ -354,7 +344,6 @@ impl RoccatDriver {
     /*                                                                                 */
     /* The CRC is a simple wrapping sum of all bytes except the trailing two.          */
     /* The original C function mutated a local accumulator; this version is pure.      */
-    #[allow(dead_code)]
     fn compute_crc(buf: &[u8]) -> u16 {
         if buf.len() < 3 {
             return 0;
@@ -366,7 +355,6 @@ impl RoccatDriver {
     }
 
     /* Validate the CRC embedded in the last two bytes of `buf` (little-endian). */
-    #[allow(dead_code)]
     fn crc_is_valid(buf: &[u8]) -> bool {
         if buf.len() < 3 {
             return false;
@@ -418,7 +406,6 @@ impl RoccatDriver {
     /* Read the key mapping profile report securely validating CRC. */
     async fn read_profile_report(&self, io: &mut DeviceIo, profile_idx: u8) -> Result<RoccatProfileReport> {
         const ROCCAT_CONFIG_KEY_MAPPING: u8 = 0x90;
-        const ROCCAT_REPORT_ID_KEY_MAPPING: u8 = 7;
         self.set_config_profile(io, profile_idx, ROCCAT_CONFIG_KEY_MAPPING).await?;
 
         let mut buf = [0u8; 77];
@@ -478,7 +465,6 @@ impl RoccatDriver {
         Ok(())
     }
 
-    #[allow(dead_code)]
     async fn read_macro(&self, io: &mut DeviceIo, profile_idx: u8, btn_idx: u8) -> Result<RoccatMacro> {
         self.set_config_profile(io, profile_idx, 0).await?;
         self.set_config_profile(io, profile_idx, btn_idx).await?;
@@ -502,7 +488,6 @@ impl RoccatDriver {
         Ok(RoccatMacro::from_bytes(&buf))
     }
 
-    #[allow(dead_code)]
     async fn write_macro(&self, io: &mut DeviceIo, report: &mut RoccatMacro) -> Result<()> {
         let mut buf = (*report).into_bytes();
         let crc = Self::compute_crc(&buf);

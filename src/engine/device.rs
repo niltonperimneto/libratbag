@@ -43,7 +43,6 @@ pub mod special_action {
     pub const WHEEL_RIGHT:           u32 = BASE + 3;
     pub const WHEEL_UP:              u32 = BASE + 4;
     pub const WHEEL_DOWN:            u32 = BASE + 5;
-    pub const RATCHET_MODE_SWITCH:   u32 = BASE + 6;
     pub const RESOLUTION_CYCLE_UP:   u32 = BASE + 7;
     pub const RESOLUTION_CYCLE_DOWN: u32 = BASE + 8;
     pub const RESOLUTION_UP:         u32 = BASE + 9;

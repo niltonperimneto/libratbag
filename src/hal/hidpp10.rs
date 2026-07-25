@@ -21,21 +21,12 @@ use super::hidpp::{self, HidppReport, DEVICE_IDX_CORDED, DEVICE_IDX_RECEIVER};
 /* ------------------------------------------------------------------ */
 
 const REG_HIDPP_NOTIFICATIONS: u8 = 0x00;
-const REG_INDIVIDUAL_FEATURES: u8 = 0x01;
-const REG_BATTERY_STATUS: u8 = 0x07;
-const REG_BATTERY_MILEAGE: u8 = 0x0D;
 const REG_CURRENT_PROFILE: u8 = 0x0F;
-const REG_LED_STATUS: u8 = 0x51;
-const REG_LED_INTENSITY: u8 = 0x54;
 const REG_LED_COLOR: u8 = 0x57;
-const REG_OPTICAL_SENSOR: u8 = 0x61;
 const REG_CURRENT_RESOLUTION: u8 = 0x63;
 const REG_USB_REFRESH_RATE: u8 = 0x64;
 const REG_MEMORY_MANAGEMENT: u8 = 0xA0;
 const REG_READ_MEMORY: u8 = 0xA2;
-const REG_DEVICE_CONNECTION: u8 = 0xB2;
-const REG_PAIRING_INFORMATION: u8 = 0xB5;
-const REG_FIRMWARE_INFORMATION: u8 = 0xF1;
 
 /* HID++ 1.0 sub-IDs for register access */
 const SUB_ID_GET_REGISTER: u8 = 0x81;
@@ -58,31 +49,8 @@ const NUM_BUTTONS_G9: usize = 10;
 
 /* Profile type markers for the current-profile register (0x0F) */
 const PROFILE_TYPE_INDEX: u8 = 0x00;
-#[allow(dead_code)]
 const PROFILE_TYPE_ADDRESS: u8 = 0x01;
 const PROFILE_TYPE_FACTORY: u8 = 0xFF;
-
-/* Pairing information sub-types for register 0xB5 */
-#[allow(dead_code)]
-const PAIRING_INFO_DEVICE: u8 = 0x20;
-#[allow(dead_code)]
-const PAIRING_INFO_DEVICE_NAME: u8 = 0x40;
-#[allow(dead_code)]
-const PAIRING_INFO_EXTENDED: u8 = 0x30;
-
-/* Device connection/disconnection commands for register 0xB2 */
-#[allow(dead_code)]
-const CONNECT_OPEN_LOCK: u8 = 1;
-#[allow(dead_code)]
-const CONNECT_CLOSE_LOCK: u8 = 2;
-#[allow(dead_code)]
-const CONNECT_DISCONNECT: u8 = 3;
-
-/* Firmware info sub-items for register 0xF1 */
-#[allow(dead_code)]
-const FW_INFO_NAME_AND_VERSION: u8 = 0x01;
-#[allow(dead_code)]
-const FW_INFO_BUILD_NUMBER: u8 = 0x02;
 
 /* Button binding type codes from onboard profiles */
 const PROFILE_BUTTON_TYPE_BUTTON: u8 = 0x81;
@@ -115,11 +83,6 @@ const MACRO_END: u8 = 0xFF;
 /* Maximum number of macro events before we bail out. */
 const MAX_MACRO_EVENTS: usize = 256;
 
-/* The receiver's own HID++ device index, used for pairing commands.
- * This happens to be the same value as DEVICE_IDX_CORDED (0xFF). */
-#[allow(dead_code)]
-const HIDPP_RECEIVER_IDX: u8 = 0xFF;
-
 /* ------------------------------------------------------------------ */
 /*  Enumerations                                                       */
 /* ------------------------------------------------------------------ */
@@ -135,149 +98,6 @@ pub enum Hidpp10ProfileType {
     G500,
     G700,
     G9,
-}
-
-impl Hidpp10ProfileType {
-    #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_uppercase().as_str() {
-            "G500" => Self::G500,
-            "G700" => Self::G700,
-            "G9" => Self::G9,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/* Battery level as reported by register 0x07. */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-#[allow(dead_code)]
-pub enum BatteryLevel {
-    Unknown = 0x00,
-    Critical = 0x01,
-    CriticalLegacy = 0x02,
-    Low = 0x03,
-    LowLegacy = 0x04,
-    Good = 0x05,
-    GoodLegacy = 0x06,
-    FullLegacy = 0x07,
-}
-
-impl BatteryLevel {
-    fn from_u8(val: u8) -> Self {
-        match val {
-            0x01 => Self::Critical,
-            0x02 => Self::CriticalLegacy,
-            0x03 => Self::Low,
-            0x04 => Self::LowLegacy,
-            0x05 => Self::Good,
-            0x06 => Self::GoodLegacy,
-            0x07 => Self::FullLegacy,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/* Battery charge state shared by registers 0x07 and 0x0D. */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-#[allow(dead_code)]
-pub enum BatteryChargeState {
-    NotCharging = 0x00,
-    Unknown = 0x20,
-    Charging = 0x21,
-    ChargingComplete = 0x22,
-    ChargingError = 0x23,
-    ChargingFast = 0x24,
-    ChargingSlow = 0x25,
-    ToppingCharge = 0x26,
-}
-
-impl BatteryChargeState {
-    fn from_u8(val: u8) -> Self {
-        match val {
-            0x21 => Self::Charging,
-            0x22 => Self::ChargingComplete,
-            0x23 => Self::ChargingError,
-            0x24 => Self::ChargingFast,
-            0x25 => Self::ChargingSlow,
-            0x26 => Self::ToppingCharge,
-            0x20 => Self::Unknown,
-            _ if val <= 0x1F => Self::NotCharging,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/* LED hardware status per LED, from register 0x51. Each LED occupies a
- * 4-bit nibble in the register response, supporting seven distinct modes. */
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(u8)]
-#[allow(dead_code)]
-pub enum LedStatus {
-    #[default]
-    NoChange = 0x0,
-    Off = 0x1,
-    On = 0x2,
-    Blink = 0x3,
-    Heartbeat = 0x4,
-    SlowOn = 0x5,
-    SlowOff = 0x6,
-}
-
-impl LedStatus {
-    fn from_nibble(val: u8) -> Self {
-        match val & 0x0F {
-            0x1 => Self::Off,
-            0x2 => Self::On,
-            0x3 => Self::Blink,
-            0x4 => Self::Heartbeat,
-            0x5 => Self::SlowOn,
-            0x6 => Self::SlowOff,
-            _ => Self::NoChange,
-        }
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Data structures                                                    */
-/* ------------------------------------------------------------------ */
-
-/* Return type for battery status queries (register 0x07). */
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct BatteryStatusInfo {
-    pub level: BatteryLevel,
-    pub charge_state: BatteryChargeState,
-    pub low_threshold_percent: u8,
-}
-
-/* Return type for battery mileage queries (register 0x0D). */
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct BatteryMileage {
-    pub level_percent: u8,
-    pub max_seconds: u32,
-    pub charge_state: BatteryChargeState,
-}
-
-/* Return type for firmware queries (register 0xF1). */
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct FirmwareInfo {
-    pub major: u8,
-    pub minor: u8,
-    pub build: u16,
-}
-
-/* Return type for pairing queries (register 0xB5). */
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct PairingInfo {
-    pub report_interval: u8,
-    pub wpid: u16,
-    pub device_type: u8,
 }
 
 /* A single entry in the device's DPI mapping table. Maps raw register
@@ -417,10 +237,6 @@ impl Hidpp10ResolutionLongPayload {
     }
     pub fn xres(&self) -> u16 { u16::from_le_bytes(self.xres) }
     pub fn yres(&self) -> u16 { u16::from_le_bytes(self.yres) }
-    #[allow(dead_code)]
-    pub fn set_xres(&mut self, res: u16) { self.xres = res.to_le_bytes(); }
-    #[allow(dead_code)]
-    pub fn set_yres(&mut self, res: u16) { self.yres = res.to_le_bytes(); }
 }
 
 /* Protocol version stored after a successful probe. */
@@ -452,69 +268,6 @@ fn hidpp10_special_from_code(code: u8) -> u32 {
         0x21 => special_action::PROFILE_CYCLE_DOWN,
         _ => special_action::UNKNOWN,
     }
-}
-
-#[allow(dead_code)]
-fn hidpp10_code_from_special(special: u32) -> u8 {
-    match special {
-        x if x == special_action::WHEEL_LEFT => 0x01,
-        x if x == special_action::WHEEL_RIGHT => 0x02,
-        x if x == special_action::BATTERY_LEVEL => 0x03,
-        x if x == special_action::RESOLUTION_UP => 0x04,
-        x if x == special_action::RESOLUTION_CYCLE_UP => 0x05,
-        x if x == special_action::RESOLUTION_DOWN => 0x08,
-        x if x == special_action::RESOLUTION_CYCLE_DOWN => 0x09,
-        x if x == special_action::PROFILE_UP => 0x10,
-        x if x == special_action::PROFILE_CYCLE_UP => 0x11,
-        x if x == special_action::PROFILE_DOWN => 0x20,
-        x if x == special_action::PROFILE_CYCLE_DOWN => 0x21,
-        _ => 0x00,
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/*  DPI table helpers                                                  */
-/* ------------------------------------------------------------------ */
-
-/* Build a DPI mapping table from a list of DPI values (from .device file).
- * Each entry maps raw_value = (0x80 + index) to the corresponding DPI. */
-#[allow(dead_code)]
-fn build_dpi_table_from_list(entries: &[u32]) -> Vec<DpiMapping> {
-    entries.iter().enumerate().map(|(i, &dpi)| DpiMapping {
-        raw_value: (i as u8).wrapping_add(0x80),
-        dpi,
-    }).collect()
-}
-
-/* Build a DPI mapping table from a range specification (min, max, step).
- * Raw value 0 is reserved (DPI 0); values 1..=raw_max map linearly with
- * rounding to the nearest multiple of 25. */
-#[allow(dead_code)]
-fn build_dpi_table_from_range(min: u32, max: u32, step: u32) -> Vec<DpiMapping> {
-    if step == 0 || max <= min {
-        return Vec::new();
-    }
-    let raw_max = (max - min) / step;
-    let mut table = Vec::with_capacity(raw_max as usize + 1);
-    table.push(DpiMapping { raw_value: 0, dpi: 0 });
-    for i in 1..=raw_max {
-        let dpi_exact = min + step * i;
-        let dpi_rounded = ((dpi_exact + 12) / 25) * 25;
-        table.push(DpiMapping { raw_value: i as u8, dpi: dpi_rounded });
-    }
-    table
-}
-
-/* Get the maximum DPI value from the table. Returns 0 if the table is empty. */
-#[allow(dead_code)]
-fn dpi_table_get_max(table: &[DpiMapping]) -> u32 {
-    table.iter().map(|m| m.dpi).max().unwrap_or(0)
-}
-
-/* Get the minimum non-zero DPI value from the table. Returns 0 if empty. */
-#[allow(dead_code)]
-fn dpi_table_get_min(table: &[DpiMapping]) -> u32 {
-    table.iter().filter(|m| m.dpi > 0).map(|m| m.dpi).min().unwrap_or(0)
 }
 
 /* Look up the DPI value for a raw register byte. Falls back to raw × 50
@@ -1233,281 +986,6 @@ impl Hidpp10Driver {
         Ok(events)
     }
 
-    /* ---- Register 0x00: HID++ Notifications ----------------------- */
-
-    #[allow(dead_code)]
-    async fn get_hidpp_notifications(&self, io: &mut DeviceIo) -> Result<u32> {
-        let p = self.get_register(io, REG_HIDPP_NOTIFICATIONS, [0, 0, 0]).await?;
-        Ok(u32::from(p[0]) | (u32::from(p[1] & 0x1F) << 8) | (u32::from(p[2] & 0x07) << 16))
-    }
-
-    #[allow(dead_code)]
-    async fn set_hidpp_notifications(&self, io: &mut DeviceIo, flags: u32) -> Result<()> {
-        self.set_register(io, REG_HIDPP_NOTIFICATIONS, [
-            (flags & 0xFF) as u8,
-            ((flags >> 8) & 0x1F) as u8,
-            ((flags >> 16) & 0x07) as u8,
-        ]).await?;
-        Ok(())
-    }
-
-    /* ---- Register 0x01: Individual Features ----------------------- */
-
-    #[allow(dead_code)]
-    async fn get_individual_features(&self, io: &mut DeviceIo) -> Result<u32> {
-        let p = self.get_register(io, REG_INDIVIDUAL_FEATURES, [0, 0, 0]).await?;
-        Ok(u32::from(p[0]) | (u32::from(p[1] & 0x0E) << 8) | (u32::from(p[2] & 0x3F) << 16))
-    }
-
-    #[allow(dead_code)]
-    async fn set_individual_features(&self, io: &mut DeviceIo, mask: u32) -> Result<()> {
-        self.set_register(io, REG_INDIVIDUAL_FEATURES, [
-            (mask & 0xFF) as u8,
-            ((mask >> 8) & 0x0E) as u8,
-            ((mask >> 16) & 0x3F) as u8,
-        ]).await?;
-        Ok(())
-    }
-
-    /* ---- Register 0x07: Battery Status ---------------------------- */
-
-    #[allow(dead_code)]
-    async fn get_battery_status(&self, io: &mut DeviceIo) -> Result<BatteryStatusInfo> {
-        let p = self.get_register(io, REG_BATTERY_STATUS, [0, 0, 0]).await?;
-        let mut threshold = p[2];
-        if threshold >= 7 { threshold = 0; }
-        threshold *= 5;
-        Ok(BatteryStatusInfo {
-            level: BatteryLevel::from_u8(p[0]),
-            charge_state: BatteryChargeState::from_u8(p[1]),
-            low_threshold_percent: threshold,
-        })
-    }
-
-    /* ---- Register 0x0D: Battery Mileage --------------------------- */
-
-    #[allow(dead_code)]
-    async fn get_battery_mileage(&self, io: &mut DeviceIo) -> Result<BatteryMileage> {
-        let p = self.get_register(io, REG_BATTERY_MILEAGE, [0, 0, 0]).await?;
-        let mut max = u32::from(p[1]) | (u32::from(p[2] & 0x0F) << 8);
-        match (p[2] & 0x30) >> 4 {
-            0x03 => max *= 24 * 60 * 60,
-            0x02 => max *= 60 * 60,
-            0x01 => max *= 60,
-            _ => {}
-        }
-        let charge_state = match p[2] >> 6 {
-            0x01 => BatteryChargeState::Charging,
-            0x02 => BatteryChargeState::ChargingComplete,
-            0x03 => BatteryChargeState::ChargingError,
-            _ => BatteryChargeState::NotCharging,
-        };
-        Ok(BatteryMileage {
-            level_percent: p[0] & 0x7F,
-            max_seconds: max,
-            charge_state,
-        })
-    }
-
-    /* ---- Register 0x51: LED Status -------------------------------- */
-
-    #[allow(dead_code)]
-    async fn get_led_status(&self, io: &mut DeviceIo) -> Result<[LedStatus; 6]> {
-        let p = self.get_register(io, REG_LED_STATUS, [0, 0, 0]).await?;
-        Ok([
-            LedStatus::from_nibble(p[0]),
-            LedStatus::from_nibble(p[0] >> 4),
-            LedStatus::from_nibble(p[1]),
-            LedStatus::from_nibble(p[1] >> 4),
-            LedStatus::from_nibble(p[2]),
-            LedStatus::from_nibble(p[2] >> 4),
-        ])
-    }
-
-    #[allow(dead_code)]
-    async fn set_led_status(&self, io: &mut DeviceIo, leds: &[LedStatus; 6]) -> Result<()> {
-        self.set_register(io, REG_LED_STATUS, [
-            (leds[0] as u8) | ((leds[1] as u8) << 4),
-            (leds[2] as u8) | ((leds[3] as u8) << 4),
-            (leds[4] as u8) | ((leds[5] as u8) << 4),
-        ]).await?;
-        Ok(())
-    }
-
-    /* ---- Register 0x54: LED Intensity ----------------------------- */
-
-    #[allow(dead_code)]
-    async fn get_led_intensity(&self, io: &mut DeviceIo) -> Result<[u8; 6]> {
-        let p = self.get_register(io, REG_LED_INTENSITY, [0, 0, 0]).await?;
-        Ok([
-            10 * (p[0] & 0x0F),       10 * ((p[0] >> 4) & 0x0F),
-            10 * (p[1] & 0x0F),       10 * ((p[1] >> 4) & 0x0F),
-            10 * (p[2] & 0x0F),       10 * ((p[2] >> 4) & 0x0F),
-        ])
-    }
-
-    #[allow(dead_code)]
-    async fn set_led_intensity(&self, io: &mut DeviceIo, pcts: &[u8; 6]) -> Result<()> {
-        self.set_register(io, REG_LED_INTENSITY, [
-            (pcts[0] / 10) | ((pcts[1] / 10) << 4),
-            (pcts[2] / 10) | ((pcts[3] / 10) << 4),
-            (pcts[4] / 10) | ((pcts[5] / 10) << 4),
-        ]).await?;
-        Ok(())
-    }
-
-    /* ---- Register 0x61: Optical Sensor Settings ------------------- */
-
-    #[allow(dead_code)]
-    async fn get_optical_sensor_settings(&self, io: &mut DeviceIo) -> Result<u8> {
-        let p = self.get_register(io, REG_OPTICAL_SENSOR, [0, 0, 0]).await?;
-        Ok(p[0])
-    }
-
-    /* ---- Register 0xB2: Device Connection / Disconnection --------- */
-
-    #[allow(dead_code)]
-    async fn open_pairing_lock(&self, io: &mut DeviceIo, timeout: u8) -> Result<()> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_SET_REGISTER, REG_DEVICE_CONNECTION,
-            [CONNECT_OPEN_LOCK, 0xFF, timeout],
-        );
-        io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Short { device_index, sub_id, address, .. }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_SET_REGISTER
-                        && address == REG_DEVICE_CONNECTION => Some(()),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 open pairing lock failed")
-    }
-
-    #[allow(dead_code)]
-    async fn close_pairing_lock(&self, io: &mut DeviceIo) -> Result<()> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_SET_REGISTER, REG_DEVICE_CONNECTION,
-            [CONNECT_CLOSE_LOCK, 0xFF, 0x00],
-        );
-        io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Short { device_index, sub_id, address, .. }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_SET_REGISTER
-                        && address == REG_DEVICE_CONNECTION => Some(()),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 close pairing lock failed")
-    }
-
-    #[allow(dead_code)]
-    async fn disconnect_device(&self, io: &mut DeviceIo, device_idx: u8) -> Result<()> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_SET_REGISTER, REG_DEVICE_CONNECTION,
-            [CONNECT_DISCONNECT, device_idx, 0x00],
-        );
-        io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Short { device_index, sub_id, address, .. }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_SET_REGISTER
-                        && address == REG_DEVICE_CONNECTION => Some(()),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 disconnect device failed")
-    }
-
-    /* ---- Register 0xB5: Pairing Information ----------------------- */
-
-    #[allow(dead_code)]
-    async fn get_pairing_information(&self, io: &mut DeviceIo) -> Result<PairingInfo> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_GET_LONG_REGISTER, REG_PAIRING_INFORMATION,
-            [PAIRING_INFO_DEVICE + self.device_index - 1, 0x00, 0x00],
-        );
-        let resp = io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Long { device_index, sub_id, address, params }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_GET_LONG_REGISTER
-                        && address == REG_PAIRING_INFORMATION => Some(params),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 get pairing info failed")?;
-        Ok(PairingInfo {
-            report_interval: resp[2],
-            wpid: u16::from_be_bytes([resp[3], resp[4]]),
-            device_type: resp[7],
-        })
-    }
-
-    #[allow(dead_code)]
-    async fn get_pairing_device_name(&self, io: &mut DeviceIo) -> Result<String> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_GET_LONG_REGISTER, REG_PAIRING_INFORMATION,
-            [PAIRING_INFO_DEVICE_NAME + self.device_index - 1, 0x00, 0x00],
-        );
-        let resp = io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Long { device_index, sub_id, address, params }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_GET_LONG_REGISTER
-                        && address == REG_PAIRING_INFORMATION => Some(params),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 get pairing device name failed")?;
-        let name_len = resp[1] as usize;
-        let end = (2 + name_len).min(resp.len());
-        Ok(String::from_utf8_lossy(&resp[2..end]).into_owned())
-    }
-
-    #[allow(dead_code)]
-    async fn get_extended_pairing_info(&self, io: &mut DeviceIo) -> Result<u32> {
-        let request = hidpp::build_short_report(
-            HIDPP_RECEIVER_IDX, SUB_ID_GET_LONG_REGISTER, REG_PAIRING_INFORMATION,
-            [PAIRING_INFO_EXTENDED + self.device_index - 1, 0x00, 0x00],
-        );
-        let resp = io.request(&request, 20, 3, move |buf| {
-            let report = HidppReport::parse(buf)?;
-            if report.is_error() { return None; }
-            match report {
-                HidppReport::Long { device_index, sub_id, address, params }
-                    if device_index == HIDPP_RECEIVER_IDX
-                        && sub_id == SUB_ID_GET_LONG_REGISTER
-                        && address == REG_PAIRING_INFORMATION => Some(params),
-                _ => None,
-            }
-        }).await.context("HID++ 1.0 get extended pairing info failed")?;
-        Ok(u32::from_be_bytes([resp[1], resp[2], resp[3], resp[4]]))
-    }
-
-    /* ---- Register 0xF1: Firmware Information ----------------------- */
-
-    #[allow(dead_code)]
-    async fn get_firmware_information(&self, io: &mut DeviceIo) -> Result<FirmwareInfo> {
-        let ver = self.get_register(
-            io, REG_FIRMWARE_INFORMATION, [FW_INFO_NAME_AND_VERSION, 0, 0],
-        ).await?;
-        let bld = self.get_register(
-            io, REG_FIRMWARE_INFORMATION, [FW_INFO_BUILD_NUMBER, 0, 0],
-        ).await?;
-        Ok(FirmwareInfo {
-            major: ver[1],
-            minor: ver[2],
-            build: u16::from_be_bytes([bld[1], bld[2]]),
-        })
-    }
-
     /* ---- Resolution (register 0x63) ------------------------------- */
 
     async fn read_resolution(&self, io: &mut DeviceIo, profile: &mut ProfileInfo) -> Result<()> {
@@ -1679,32 +1157,6 @@ impl Hidpp10Driver {
             "HID++ 1.0: directory: {} enabled profiles",
             self.onboard_profiles.iter().filter(|p| p.enabled).count()
         );
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn write_profile_directory(&self, io: &mut DeviceIo) -> Result<()> {
-        if self.profile_type == Hidpp10ProfileType::Unknown { return Ok(()); }
-        let mut bytes = [0xFFu8; PAGE_SIZE];
-        let mut index = 0usize;
-        for p in &self.onboard_profiles {
-            if !p.enabled { continue; }
-            let base = index * 3;
-            bytes[base] = p.page;
-            bytes[base + 1] = p.offset;
-            bytes[base + 2] = ((0b111u8 << index) >> 2) & 0b111;
-            index += 1;
-        }
-        let crc = hidpp::compute_ccitt_crc(&bytes[..PAGE_SIZE - 2]);
-        bytes[PAGE_SIZE - 2] = (crc >> 8) as u8;
-        bytes[PAGE_SIZE - 1] = (crc & 0xFF) as u8;
-
-        let half = PAGE_SIZE / 2;
-        self.send_hot_payload(io, 0x00, 0x0000, &bytes[..half]).await?;
-        self.erase_memory(io, 0x01).await?;
-        self.write_flash(io, 0x00, 0x0000, 0x01, 0x0000, half as u16).await?;
-        self.send_hot_payload(io, 0x00, 0x0000, &bytes[half..]).await?;
-        self.write_flash(io, 0x00, 0x0000, 0x01, half as u16, half as u16).await?;
         Ok(())
     }
 

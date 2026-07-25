@@ -13,7 +13,6 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 pub mod engine;
-pub mod error;
 pub mod hal;
 pub mod ipc;
 pub mod udev_monitor;
