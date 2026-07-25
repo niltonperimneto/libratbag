@@ -146,7 +146,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub model: String,
     pub firmware_version: String,
-    /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse, 3=keyboard */
+    /* Device type exposed over DBus: 0=unspecified, 1=other, 2=mouse. */
+    /* (3 was keyboard; keyboard support migrated to clackd, see docs/keyboard-migration-clackd.md.) */
     pub device_type: u32,
     pub profiles: Vec<ProfileInfo>,
     pub driver_config: crate::engine::device_database::DriverConfig,
@@ -259,7 +260,6 @@ impl DeviceInfo {
         /* Map the .device file's DeviceType string to the DBus integer enum. */
         let device_type = match entry.device_type.to_lowercase().as_str() {
             "mouse" => 2,
-            "keyboard" => 3,
             "other" => 1,
             _ => 0, /* unspecified */
         };
