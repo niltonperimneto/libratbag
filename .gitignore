@@ -11,8 +11,10 @@ Thumbs.db
 .github/
 *.c
 *.h
-ratbagctl
-ratbagd
+# The built binaries, which meson copies to the repo root. Anchored to the root so they do not
+# also match the src/bin/ratbagctl/ and ratbagd/ source directories.
+/ratbagctl
+/ratbagd
 node_modules
 .claude/
 .gemini/

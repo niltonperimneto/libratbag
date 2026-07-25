@@ -133,7 +133,9 @@ Build Requirements
 
 The Rust daemon itself depends on `tokio`, `zbus`, `nix`, `udev`, `serde`,
 `tracing`, and other crates — Cargo resolves these automatically. The CLI
-binary target (`ratbagctl`) depends on `clap`, `zbus`, `tokio`, and `anyhow`.
+binary target (`ratbagctl`) depends on `clap`, `zbus`, `tokio`, `anyhow`,
+`thiserror`, and `serde`/`serde_json`; its colour output is written against the
+standard library rather than a terminal crate.
 `Cargo.lock` files are committed for reproducible builds
 (`cargo build --locked`).
 
@@ -237,79 +239,159 @@ Using ratbagctl
 `ratbagctl` is the command-line interface for configuring devices. It talks
 to the running `ratbagd` daemon over DBus.
 
-### Quick examples
+Every command has the same shape:
 
-    ratbagctl list                              # list connected devices
-    ratbagctl info 0                            # show device details
-    ratbagctl commit 0                          # commit pending changes to hardware
-    ratbagctl profile list 0                    # list profiles for device 0
-    ratbagctl profile info 0 0                  # show profile 0 details
-    ratbagctl profile active 0 1                # switch to profile 1
-    ratbagctl profile name 0 0 "Gaming"         # set profile name
-    ratbagctl profile enable 0 1                # enable profile 1
-    ratbagctl profile angle-snapping 0 0 on     # enable angle snapping
-    ratbagctl profile debounce 0 0 10           # set debounce to 10 ms
-    ratbagctl resolution dpi 0 0 0 800          # set resolution 0 to 800 DPI
-    ratbagctl resolution active 0 0 2           # activate resolution 2
-    ratbagctl resolution default 0 0 1          # set default resolution to 1
-    ratbagctl button list 0 0                   # list button mappings
-    ratbagctl button set-button 0 0 1 3         # set button 1 to logical button 3
-    ratbagctl button set-key 0 0 1 30           # set button 1 to keycode 30 (KEY_A)
-    ratbagctl button set-macro 0 0 1 30:1 30:0  # set button 1 to a key macro
-    ratbagctl led mode 0 0 0 breathing          # set LED 0 to breathing mode
-    ratbagctl led color 0 0 0 ff0000            # set LED color to red
-    ratbagctl led secondary-color 0 0 0 00ff00  # set secondary LED color
-    ratbagctl led brightness 0 0 0 200          # set brightness to 200
-    ratbagctl led duration 0 0 0 1000           # set effect duration to 1000 ms
+    ratbagctl [SELECTORS] <group> [INDEX] <verb> [VALUE]
+
+Supply a value to write it, leave it out to read the current one. Selectors say
+*which* object to act on, and each defaults to the obvious choice, so the
+everyday commands carry no indices at all:
+
+    ratbagctl                                   # list the connected devices
+    ratbagctl show                              # everything about the device
+    ratbagctl dpi 1600                          # set the active resolution
+    ratbagctl dpi                               # print it
+    ratbagctl rate 1000                         # set the report rate
+    ratbagctl led color red                     # paint LED 0 red
+    ratbagctl led mode breathing                # set the lighting effect
+    ratbagctl button 4 key a                    # map button 4 to the A key
+    ratbagctl button 4 special wheel-up         # …or to a device action
+    ratbagctl button 4 macro +ctrl c -ctrl      # …or to Ctrl+C
+    ratbagctl profile 1 activate                # switch profile
+    ratbagctl -d g502 -p 1 dpi 800              # be explicit when you need to
+
+### Selectors
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `-d`, `--device <SPEC>` | List index, sysname, or part of the device's name (case-insensitive) | the only connected device; an error listing the candidates if there is more than one |
+| `-p`, `--profile <N>` | Profile index | the **active** profile |
+| `-r`, `--resolution <N>` | Resolution index | the **active** resolution |
+| `-l`, `--led <N>` | LED index | `0` |
+| `-b`, `--button <N>` | Button index | none — required by the `button` write verbs |
+
+A group's leading index is the same thing as its flag, closer to the verb:
+`ratbagctl led 1 color red` and `ratbagctl -l 1 led color red` are one command.
+
+Global options: `--color <auto|always|never>` and `--json` (see
+[Output](#output) below), plus `-h/--help` and `-V/--version`.
 
 ### Subcommands
 
 | Command | Description |
 |---|---|
 | **General** | |
-| `list` | List all connected devices (shows API version) |
-| `info <device>` | Show detailed info for a device |
-| `commit <device>` | Commit all pending changes to hardware |
-| **Profile** | |
-| `profile list <device>` | List profiles (name, rate, dirty state) |
-| `profile info <device> <profile>` | Show full profile details |
-| `profile active <device> <profile>` | Set the active profile |
-| `profile name <device> <profile> [name]` | Get or set profile name |
-| `profile enable <device> <profile>` | Enable a profile |
-| `profile disable <device> <profile>` | Disable a profile |
-| `profile rate <device> <profile> <hz>` | Set profile report rate |
-| `profile angle-snapping <device> <profile> [on\|off]` | Get or set angle snapping |
-| `profile debounce <device> <profile> [ms]` | Get or set debounce time |
-| **Resolution** | |
-| `resolution list <device> <profile>` | List resolutions (DPI list, capabilities) |
-| `resolution dpi <device> <profile> <res> [dpi]` | Get or set DPI |
-| `resolution active <device> <profile> <res>` | Set active resolution |
-| `resolution default <device> <profile> <res>` | Set default resolution |
-| `resolution enable <device> <profile> <res>` | Enable a resolution slot |
-| `resolution disable <device> <profile> <res>` | Disable a resolution slot |
-| **Button** | |
-| `button list <device> <profile>` | List buttons |
-| `button get <device> <profile> <button>` | Get button mapping details |
-| `button set-button <device> <profile> <btn> <value>` | Map to logical button (action type 1) |
-| `button set-special <device> <profile> <btn> <value>` | Map to special action (action type 2) |
-| `button set-key <device> <profile> <btn> <keycode>` | Map to key (action type 3) |
-| `button set-macro <device> <profile> <btn> <events...>` | Map to macro (action type 4); events are `keycode:direction` pairs |
-| `button disable <device> <profile> <button>` | Disable a button |
-| **LED** | |
-| `led list <device> <profile>` | List LEDs |
-| `led get <device> <profile> <led>` | Get LED info (mode, colors, brightness, duration, color depth) |
-| `led mode <device> <profile> <led> <mode>` | Set mode (off, solid, cycle, wave, starlight, breathing, tricolor) |
-| `led color <device> <profile> <led> <hex>` | Set primary color (e.g. `ff0000`) |
-| `led secondary-color <device> <profile> <led> <hex>` | Set secondary color |
-| `led tertiary-color <device> <profile> <led> <hex>` | Set tertiary color |
-| `led brightness <device> <profile> <led> <0-255>` | Set brightness |
-| `led duration <device> <profile> <led> <ms>` | Set effect duration in milliseconds |
+| `list` (alias `ls`) | List connected devices; also what a bare `ratbagctl` prints |
+| `show` (alias `info`) | Device overview: profiles, rates, states |
+| `commit` | Write staged changes to the device |
+| `dpi [DPI]` | Get or set the active resolution's DPI |
+| `rate [HZ]` | Get or set the active profile's report rate |
+| **Profile** — `ratbagctl profile [N] …` (alias `prof`) | |
+| `profile list` | List profiles; also what a bare `profile` prints |
+| `profile [N] show` | Full detail: rates, resolutions, buttons, LEDs |
+| `profile [N] activate` (aliases `use`, `switch`) | Make it the active profile |
+| `profile [N] name [NAME]` | Get or set the profile name |
+| `profile [N] enable` / `disable` | Enable or disable the profile |
+| `profile [N] rate [HZ]` | Get or set the report rate |
+| `profile [N] angle-snapping [on\|off]` | Get or set angle snapping |
+| `profile [N] debounce [MS]` | Get or set the debounce time |
+| **Resolution** — `ratbagctl resolution [N] …` (alias `res`) | |
+| `resolution list` | List resolutions; also what a bare `resolution` prints |
+| `resolution [N] show` | Full detail: DPI, supported steps, capabilities |
+| `resolution [N] dpi [DPI]` | Get or set the DPI |
+| `resolution [N] activate` | Make it the active resolution |
+| `resolution [N] default` | Make it the profile's default |
+| `resolution [N] enable` / `disable` | Enable or disable the slot |
+| **Button** — `ratbagctl button [N] …` (alias `btn`) | |
+| `button list` | List buttons and what they do |
+| `button [N] show` | One button's mapping and capabilities |
+| `button [N] key <KEY>` | Send a key press |
+| `button [N] click <BUTTON>` | Act as another mouse button |
+| `button [N] special <ACTION>` | Perform a device-handled action |
+| `button [N] macro <STEP…>` | Play a key macro |
+| `button [N] disable` (aliases `off`, `none`) | Do nothing when pressed |
+| **LED** — `ratbagctl led [N] …` | |
+| `led list` | List LEDs; also what a bare `led` prints |
+| `led [N] show` | Full detail: mode, colours, brightness, colour depth |
+| `led [N] mode [MODE]` | Get or set the effect |
+| `led [N] color [COLOR]` | Get or set the primary colour |
+| `led [N] secondary-color [COLOR]` | Secondary colour (starlight, tricolor) |
+| `led [N] tertiary-color [COLOR]` | Tertiary colour (tricolor) |
+| `led [N] brightness [0-255]` | Get or set the brightness |
+| `led [N] duration [MS]` | Get or set the effect duration, in ms |
 | **Test / Dev** | |
-| `test load-device <json_file>` | Load a test device from a JSON file |
+| `test load-device <FILE>` | Load a test device from a JSON file |
 | `test reset` | Remove all test devices |
 
-`<device>` can be a zero-based index from `ratbagctl list` or a sysname
-substring. All write commands automatically commit changes to hardware.
+All write commands commit to hardware immediately.
+
+### Values
+
+Arguments are named rather than numeric. Every one of them still accepts the
+raw wire number, and `--help` lists the accepted spellings, so a typo is
+rejected with the valid values before anything is sent to the device.
+
+| Argument | Accepted |
+|---|---|
+| `MODE` | `off`, `solid`, `cycle`, `breathing`, `wave`, `starlight`, `tricolor` |
+| `COLOR` | `red`, `blue`, `cyan`, … · `#ff0000` · `ff0000` · `#f00` · `255,0,0` |
+| `KEY` | `a`, `5`, `enter`, `f1`, `ctrl`, `volumeup`, … · `KEY_A` · `code:30` for a raw evdev code |
+| `BUTTON` | `left`, `right`, `middle`, `back`, `forward`, or a logical button number |
+| `ACTION` | `wheel-up`, `wheel-down`, `resolution-cycle-up`, `resolution-alternate`, `profile-up`, `second-mode`, `battery-level`, … |
+| `STEP` | `a` (press and release), `+ctrl` (press), `-ctrl` (release), or `30:1` / `30:0` |
+| `ON_OFF` | `on`, `off` (also `true`/`false`, `yes`/`no`, `1`/`0`) |
+| `DPI` | `1600`, or `800x1600` on a device with the separate-xy capability |
+
+A key name wins over a raw code, so `key 5` is the digit-5 key; write `code:5`
+for evdev code 5. Macro steps may start with `-`, so put `--` first if a step
+would otherwise look like an option.
+
+### Output
+
+Lists are shown as aligned tables, with `[active]` in green, `[dirty]` and
+`[default]` in yellow, `[disabled]` dimmed, and a colour swatch beside every
+LED colour. Writes print one confirmation line showing what changed:
+
+    $ ratbagctl led mode breathing
+    ✓ LED 0 mode: solid → breathing
+
+A write that would change nothing is skipped, and says so. Colour and the
+`✓`/`→` glyphs are used only when the output is a terminal that supports them:
+piping or redirecting yields plain ASCII, and `NO_COLOR`, `CLICOLOR_FORCE`,
+`TERM=dumb` and `--color` are all honoured.
+
+For scripts, a read prints the bare value on its own line, and `--json` gives
+structured output on the read commands:
+
+    ratbagctl --json led show | jq .mode
+
+Failures print the reason, its cause, and what to do next:
+
+    $ ratbagctl led mode starlight
+    error: LED 0 does not support starlight mode
+      hint: this LED supports: off, solid, cycle, wave, breathing
+            run `ratbagctl led show` for its full capabilities
+
+Exit status is `0` on success, `2` for a usage error, `3` when the device or
+profile could not be found, `4` when the device does not support the value, `5`
+when the commit to hardware failed, and `1` otherwise.
+
+### Changed in 2.1
+
+The argument grammar was reworked for readability and **is not backwards
+compatible**. Indices are no longer bare positionals: what used to be
+`ratbagctl resolution dpi 0 0 1 800` is now `ratbagctl -r 1 dpi 800`, and
+`ratbagctl button set-key 0 0 4 30` is now `ratbagctl button 4 key a`. Rename
+the verbs (`profile active` → `profile activate`, `button set-key` → `button
+key`, `led get` → `led show`) and drop the device and profile indices wherever
+the defaults do what you want.
+
+Two long-standing bugs were fixed at the same time. `led mode` sent the wrong
+wire codes, so `breathing` and `tricolor` failed outright and `cycle` silently
+selected breathing; scripts that relied on `cycle` meaning breathing need
+updating. And `resolution dpi` always sent an X/Y pair, which devices without
+the separate-xy capability reject — setting a DPI now works on them.
+
 
 Twister (Desktop GUI)
 ---------------------
